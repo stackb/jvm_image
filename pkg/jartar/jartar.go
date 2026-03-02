@@ -3,6 +3,7 @@ package jartar
 import (
 	"archive/tar"
 	"archive/zip"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -15,24 +16,73 @@ type Layer struct {
 	OutputPath string
 }
 
-// Split reads a JAR file and distributes entries across layer tars by prefix
-// match. Entries not matching any layer prefix go to fallbackPath. All output
-// tars are always written, even if empty.
-func Split(inputPath, fallbackPath string, layers []Layer) error {
-	zr, err := zip.OpenReader(inputPath)
+// Artifact defines an artifact-based layer with its output path.
+type Artifact struct {
+	ID         string // e.g. "com.google.guava:guava"
+	OutputPath string
+}
+
+// MavenLockFile represents the relevant parts of the maven lock file JSON.
+type MavenLockFile struct {
+	Packages map[string][]string `json:"packages"`
+}
+
+// SplitOptions configures how a JAR is split into layered tars.
+type SplitOptions struct {
+	InputPath         string
+	FallbackPath      string
+	Layers            []Layer
+	MavenLockFilePath string
+	Artifacts         []Artifact
+}
+
+// Split reads a JAR file and distributes entries across layer tars.
+// Routing priority: explicit layers first, then artifact-derived prefixes, then fallback.
+// All output tars are always written, even if empty.
+func Split(opts SplitOptions) error {
+	zr, err := zip.OpenReader(opts.InputPath)
 	if err != nil {
 		return fmt.Errorf("opening jar: %w", err)
 	}
 	defer zr.Close()
 
-	// Open all tar writers up front.
-	type writerState struct {
-		file *os.File
-		tw   *tar.Writer
+	// Build artifact prefix map if lock file is provided.
+	type artifactWriter struct {
+		tw *tar.Writer
+	}
+	var artifactPrefixMap map[string]*tar.Writer // path prefix -> tar writer
+	var artifactWriters []writerState
+
+	if opts.MavenLockFilePath != "" && len(opts.Artifacts) > 0 {
+		lockFile, err := parseLockFile(opts.MavenLockFilePath)
+		if err != nil {
+			return err
+		}
+
+		artifactPrefixMap = make(map[string]*tar.Writer)
+		artifactWriters = make([]writerState, len(opts.Artifacts))
+
+		for i, a := range opts.Artifacts {
+			f, err := os.Create(a.OutputPath)
+			if err != nil {
+				return fmt.Errorf("creating artifact output %s: %w", a.OutputPath, err)
+			}
+			defer f.Close()
+			tw := tar.NewWriter(f)
+			defer tw.Close()
+			artifactWriters[i] = writerState{file: f, tw: tw}
+
+			// Map each package prefix for this artifact to its tar writer.
+			for _, pkg := range lockFile.Packages[a.ID] {
+				prefix := strings.ReplaceAll(pkg, ".", "/") + "/"
+				artifactPrefixMap[prefix] = tw
+			}
+		}
 	}
 
-	writers := make([]writerState, len(layers))
-	for i, l := range layers {
+	// Open explicit layer tar writers.
+	layerWriters := make([]writerState, len(opts.Layers))
+	for i, l := range opts.Layers {
 		f, err := os.Create(l.OutputPath)
 		if err != nil {
 			return fmt.Errorf("creating layer output %s: %w", l.OutputPath, err)
@@ -40,10 +90,11 @@ func Split(inputPath, fallbackPath string, layers []Layer) error {
 		defer f.Close()
 		tw := tar.NewWriter(f)
 		defer tw.Close()
-		writers[i] = writerState{file: f, tw: tw}
+		layerWriters[i] = writerState{file: f, tw: tw}
 	}
 
-	fallbackFile, err := os.Create(fallbackPath)
+	// Open fallback tar writer.
+	fallbackFile, err := os.Create(opts.FallbackPath)
 	if err != nil {
 		return fmt.Errorf("creating fallback output: %w", err)
 	}
@@ -52,19 +103,58 @@ func Split(inputPath, fallbackPath string, layers []Layer) error {
 	defer fallbackTw.Close()
 
 	for _, f := range zr.File {
-		tw := fallbackTw
-		for i, l := range layers {
-			if strings.HasPrefix(f.Name, l.Prefix) {
-				tw = writers[i].tw
-				break
-			}
-		}
+		tw := resolveWriter(f.Name, opts.Layers, layerWriters, artifactPrefixMap, fallbackTw)
 		if err := writeEntry(tw, f); err != nil {
 			return fmt.Errorf("writing entry %s: %w", f.Name, err)
 		}
 	}
 
 	return nil
+}
+
+// resolveWriter determines which tar writer should receive the given entry.
+// Priority: explicit layers first, then artifact-derived prefixes, then fallback.
+func resolveWriter(
+	name string,
+	layers []Layer,
+	layerWriters []writerState,
+	artifactPrefixMap map[string]*tar.Writer,
+	fallback *tar.Writer,
+) *tar.Writer {
+	// Check explicit layers first.
+	for i, l := range layers {
+		if strings.HasPrefix(name, l.Prefix) {
+			return layerWriters[i].tw
+		}
+	}
+
+	// Check artifact-derived prefixes.
+	if artifactPrefixMap != nil {
+		for prefix, tw := range artifactPrefixMap {
+			if strings.HasPrefix(name, prefix) {
+				return tw
+			}
+		}
+	}
+
+	return fallback
+}
+
+type writerState struct {
+	file *os.File
+	tw   *tar.Writer
+}
+
+func parseLockFile(path string) (*MavenLockFile, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("reading maven lock file: %w", err)
+	}
+	var lf MavenLockFile
+	if err := json.Unmarshal(data, &lf); err != nil {
+		return nil, fmt.Errorf("parsing maven lock file: %w", err)
+	}
+	return &lf, nil
 }
 
 func writeEntry(tw *tar.Writer, f *zip.File) error {

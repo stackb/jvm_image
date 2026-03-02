@@ -3,6 +3,7 @@ package jartar
 import (
 	"archive/tar"
 	"archive/zip"
+	"encoding/json"
 	"io"
 	"os"
 	"path/filepath"
@@ -68,17 +69,33 @@ func readTar(t *testing.T, path string) map[string]string {
 	return result
 }
 
+// createLockFile creates a maven lock file JSON with the given packages map.
+func createLockFile(t *testing.T, path string, packages map[string][]string) {
+	t.Helper()
+	lf := MavenLockFile{Packages: packages}
+	data, err := json.Marshal(lf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestSplit_NoLayers(t *testing.T) {
 	dir := t.TempDir()
 	jarPath := filepath.Join(dir, "test.jar")
 	fallbackPath := filepath.Join(dir, "fallback.tar")
 
 	createTestJar(t, jarPath, map[string]string{
-		"META-INF/MANIFEST.MF": "Manifest-Version: 1.0\n",
+		"META-INF/MANIFEST.MF":  "Manifest-Version: 1.0\n",
 		"com/example/Main.class": "main-class-bytes",
 	})
 
-	if err := Split(jarPath, fallbackPath, nil); err != nil {
+	if err := Split(SplitOptions{
+		InputPath:    jarPath,
+		FallbackPath: fallbackPath,
+	}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -99,23 +116,24 @@ func TestSplit_WithLayers(t *testing.T) {
 	exampleLayerPath := filepath.Join(dir, "example.tar")
 
 	createTestJar(t, jarPath, map[string]string{
-		"META-INF/MANIFEST.MF":              "Manifest-Version: 1.0\n",
+		"META-INF/MANIFEST.MF":                 "Manifest-Version: 1.0\n",
 		"com/google/common/collect/Lists.class": "google-class-bytes",
 		"com/google/common/base/Strings.class":  "google-strings-bytes",
 		"com/example/Main.class":                "main-class-bytes",
 		"org/other/Lib.class":                   "other-bytes",
 	})
 
-	layers := []Layer{
-		{Prefix: "com/google/", OutputPath: googleLayerPath},
-		{Prefix: "com/example/", OutputPath: exampleLayerPath},
-	}
-
-	if err := Split(jarPath, fallbackPath, layers); err != nil {
+	if err := Split(SplitOptions{
+		InputPath:    jarPath,
+		FallbackPath: fallbackPath,
+		Layers: []Layer{
+			{Prefix: "com/google/", OutputPath: googleLayerPath},
+			{Prefix: "com/example/", OutputPath: exampleLayerPath},
+		},
+	}); err != nil {
 		t.Fatal(err)
 	}
 
-	// Check google layer.
 	googleEntries := readTar(t, googleLayerPath)
 	if len(googleEntries) != 2 {
 		t.Errorf("google layer: got %d entries, want 2", len(googleEntries))
@@ -127,7 +145,6 @@ func TestSplit_WithLayers(t *testing.T) {
 		t.Error("expected Strings.class in google layer")
 	}
 
-	// Check example layer.
 	exampleEntries := readTar(t, exampleLayerPath)
 	if len(exampleEntries) != 1 {
 		t.Errorf("example layer: got %d entries, want 1", len(exampleEntries))
@@ -136,7 +153,6 @@ func TestSplit_WithLayers(t *testing.T) {
 		t.Error("expected Main.class in example layer")
 	}
 
-	// Check fallback (META-INF + org/other).
 	fallbackEntries := readTar(t, fallbackPath)
 	if _, ok := fallbackEntries["META-INF/MANIFEST.MF"]; !ok {
 		t.Error("expected MANIFEST.MF in fallback tar")
@@ -144,7 +160,6 @@ func TestSplit_WithLayers(t *testing.T) {
 	if _, ok := fallbackEntries["org/other/Lib.class"]; !ok {
 		t.Error("expected Lib.class in fallback tar")
 	}
-	// Ensure no google or example entries leaked to fallback.
 	for name := range fallbackEntries {
 		if name == "com/google/common/collect/Lists.class" ||
 			name == "com/google/common/base/Strings.class" ||
@@ -164,21 +179,21 @@ func TestSplit_EmptyLayers(t *testing.T) {
 		"com/example/Main.class": "main-class-bytes",
 	})
 
-	layers := []Layer{
-		{Prefix: "org/nonexistent/", OutputPath: emptyLayerPath},
-	}
-
-	if err := Split(jarPath, fallbackPath, layers); err != nil {
+	if err := Split(SplitOptions{
+		InputPath:    jarPath,
+		FallbackPath: fallbackPath,
+		Layers: []Layer{
+			{Prefix: "org/nonexistent/", OutputPath: emptyLayerPath},
+		},
+	}); err != nil {
 		t.Fatal(err)
 	}
 
-	// Empty layer tar should exist and be readable (just empty).
 	emptyEntries := readTar(t, emptyLayerPath)
 	if len(emptyEntries) != 0 {
 		t.Errorf("empty layer: got %d entries, want 0", len(emptyEntries))
 	}
 
-	// Everything goes to fallback.
 	fallbackEntries := readTar(t, fallbackPath)
 	if _, ok := fallbackEntries["com/example/Main.class"]; !ok {
 		t.Error("expected Main.class in fallback tar")
@@ -196,13 +211,14 @@ func TestSplit_FirstMatchWins(t *testing.T) {
 		"com/google/common/base/Strings.class": "strings-bytes",
 	})
 
-	// Broad prefix listed first should win.
-	layers := []Layer{
-		{Prefix: "com/", OutputPath: broadLayerPath},
-		{Prefix: "com/google/", OutputPath: narrowLayerPath},
-	}
-
-	if err := Split(jarPath, fallbackPath, layers); err != nil {
+	if err := Split(SplitOptions{
+		InputPath:    jarPath,
+		FallbackPath: fallbackPath,
+		Layers: []Layer{
+			{Prefix: "com/", OutputPath: broadLayerPath},
+			{Prefix: "com/google/", OutputPath: narrowLayerPath},
+		},
+	}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -214,5 +230,156 @@ func TestSplit_FirstMatchWins(t *testing.T) {
 	narrowEntries := readTar(t, narrowLayerPath)
 	if len(narrowEntries) != 0 {
 		t.Errorf("narrow layer: got %d entries, want 0 (broad should have won)", len(narrowEntries))
+	}
+}
+
+func TestSplit_ArtifactLayers(t *testing.T) {
+	dir := t.TempDir()
+	jarPath := filepath.Join(dir, "test.jar")
+	fallbackPath := filepath.Join(dir, "fallback.tar")
+	guavaPath := filepath.Join(dir, "guava.tar")
+	jsr305Path := filepath.Join(dir, "jsr305.tar")
+	lockFilePath := filepath.Join(dir, "lock.json")
+
+	createTestJar(t, jarPath, map[string]string{
+		"META-INF/MANIFEST.MF":                 "Manifest-Version: 1.0\n",
+		"com/google/common/collect/Lists.class": "lists-bytes",
+		"com/google/common/base/Strings.class":  "strings-bytes",
+		"javax/annotation/Nonnull.class":        "nonnull-bytes",
+		"example/Main.class":                    "main-bytes",
+	})
+
+	createLockFile(t, lockFilePath, map[string][]string{
+		"com.google.guava:guava": {
+			"com.google.common.collect",
+			"com.google.common.base",
+		},
+		"com.google.code.findbugs:jsr305": {
+			"javax.annotation",
+		},
+	})
+
+	if err := Split(SplitOptions{
+		InputPath:         jarPath,
+		FallbackPath:      fallbackPath,
+		MavenLockFilePath: lockFilePath,
+		Artifacts: []Artifact{
+			{ID: "com.google.guava:guava", OutputPath: guavaPath},
+			{ID: "com.google.code.findbugs:jsr305", OutputPath: jsr305Path},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	guavaEntries := readTar(t, guavaPath)
+	if _, ok := guavaEntries["com/google/common/collect/Lists.class"]; !ok {
+		t.Error("expected Lists.class in guava layer")
+	}
+	if _, ok := guavaEntries["com/google/common/base/Strings.class"]; !ok {
+		t.Error("expected Strings.class in guava layer")
+	}
+	if len(guavaEntries) != 2 {
+		t.Errorf("guava layer: got %d entries, want 2: %v", len(guavaEntries), guavaEntries)
+	}
+
+	jsr305Entries := readTar(t, jsr305Path)
+	if _, ok := jsr305Entries["javax/annotation/Nonnull.class"]; !ok {
+		t.Error("expected Nonnull.class in jsr305 layer")
+	}
+	if len(jsr305Entries) != 1 {
+		t.Errorf("jsr305 layer: got %d entries, want 1: %v", len(jsr305Entries), jsr305Entries)
+	}
+
+	fallbackEntries := readTar(t, fallbackPath)
+	if _, ok := fallbackEntries["META-INF/MANIFEST.MF"]; !ok {
+		t.Error("expected MANIFEST.MF in fallback")
+	}
+	if _, ok := fallbackEntries["example/Main.class"]; !ok {
+		t.Error("expected Main.class in fallback")
+	}
+	if len(fallbackEntries) != 2 {
+		t.Errorf("fallback: got %d entries, want 2: %v", len(fallbackEntries), fallbackEntries)
+	}
+}
+
+func TestSplit_ExplicitLayersTakePriorityOverArtifacts(t *testing.T) {
+	dir := t.TempDir()
+	jarPath := filepath.Join(dir, "test.jar")
+	fallbackPath := filepath.Join(dir, "fallback.tar")
+	explicitLayerPath := filepath.Join(dir, "explicit.tar")
+	artifactPath := filepath.Join(dir, "artifact.tar")
+	lockFilePath := filepath.Join(dir, "lock.json")
+
+	createTestJar(t, jarPath, map[string]string{
+		"com/google/common/collect/Lists.class": "lists-bytes",
+	})
+
+	createLockFile(t, lockFilePath, map[string][]string{
+		"com.google.guava:guava": {
+			"com.google.common.collect",
+		},
+	})
+
+	// Explicit layer with broader prefix should win over artifact.
+	if err := Split(SplitOptions{
+		InputPath:         jarPath,
+		FallbackPath:      fallbackPath,
+		MavenLockFilePath: lockFilePath,
+		Layers: []Layer{
+			{Prefix: "com/google/", OutputPath: explicitLayerPath},
+		},
+		Artifacts: []Artifact{
+			{ID: "com.google.guava:guava", OutputPath: artifactPath},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	explicitEntries := readTar(t, explicitLayerPath)
+	if _, ok := explicitEntries["com/google/common/collect/Lists.class"]; !ok {
+		t.Error("expected Lists.class in explicit layer (explicit takes priority)")
+	}
+
+	artifactEntries := readTar(t, artifactPath)
+	if len(artifactEntries) != 0 {
+		t.Errorf("artifact layer: got %d entries, want 0 (explicit should have won)", len(artifactEntries))
+	}
+}
+
+func TestSplit_ArtifactNotInLockFile(t *testing.T) {
+	dir := t.TempDir()
+	jarPath := filepath.Join(dir, "test.jar")
+	fallbackPath := filepath.Join(dir, "fallback.tar")
+	artifactPath := filepath.Join(dir, "artifact.tar")
+	lockFilePath := filepath.Join(dir, "lock.json")
+
+	createTestJar(t, jarPath, map[string]string{
+		"com/example/Main.class": "main-bytes",
+	})
+
+	// Lock file has no packages for this artifact.
+	createLockFile(t, lockFilePath, map[string][]string{})
+
+	if err := Split(SplitOptions{
+		InputPath:         jarPath,
+		FallbackPath:      fallbackPath,
+		MavenLockFilePath: lockFilePath,
+		Artifacts: []Artifact{
+			{ID: "com.unknown:lib", OutputPath: artifactPath},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Artifact tar should be empty (no packages matched).
+	artifactEntries := readTar(t, artifactPath)
+	if len(artifactEntries) != 0 {
+		t.Errorf("artifact layer: got %d entries, want 0", len(artifactEntries))
+	}
+
+	// Everything goes to fallback.
+	fallbackEntries := readTar(t, fallbackPath)
+	if _, ok := fallbackEntries["com/example/Main.class"]; !ok {
+		t.Error("expected Main.class in fallback")
 	}
 }

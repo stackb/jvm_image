@@ -13,8 +13,5 @@ java_binary(
 jvm_image(
     name = "hello_image",
     binary = ":hello",
-    layers = [
-        "com/google/",
-        "example/",
-    ],
+    maven_lock_file = "maven2_install.json",
 )

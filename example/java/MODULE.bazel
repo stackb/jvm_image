@@ -17,5 +17,6 @@ maven.install(
     artifacts = [
         "com.google.guava:guava:33.4.0-jre",
     ],
+    lock_file = "maven2_install.json",
 )
 use_repo(maven, "maven2")
