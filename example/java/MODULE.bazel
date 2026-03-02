@@ -4,8 +4,18 @@ module(
 )
 
 bazel_dep(name = "rules_java", version = "9.6.1")
+bazel_dep(name = "rules_jvm_external", version = "6.6")
 bazel_dep(name = "jvm_image", version = "0.0.0")
 local_path_override(
     module_name = "jvm_image",
     path = "../..",
 )
+
+maven = use_extension("@rules_jvm_external//:extensions.bzl", "maven")
+maven.install(
+    name = "maven2",
+    artifacts = [
+        "com.google.guava:guava:33.4.0-jre",
+    ],
+)
+use_repo(maven, "maven2")

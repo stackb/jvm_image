@@ -9,25 +9,56 @@ import (
 	"strings"
 )
 
-// Convert reads a JAR file (zip format) at inputPath and writes a tar
-// archive to outputPath, preserving all file names and directory structure.
-func Convert(inputPath, outputPath string) error {
+// Layer defines an output layer with a path prefix and output file path.
+type Layer struct {
+	Prefix     string
+	OutputPath string
+}
+
+// Split reads a JAR file and distributes entries across layer tars by prefix
+// match. Entries not matching any layer prefix go to fallbackPath. All output
+// tars are always written, even if empty.
+func Split(inputPath, fallbackPath string, layers []Layer) error {
 	zr, err := zip.OpenReader(inputPath)
 	if err != nil {
 		return fmt.Errorf("opening jar: %w", err)
 	}
 	defer zr.Close()
 
-	outFile, err := os.Create(outputPath)
-	if err != nil {
-		return fmt.Errorf("creating output: %w", err)
+	// Open all tar writers up front.
+	type writerState struct {
+		file *os.File
+		tw   *tar.Writer
 	}
-	defer outFile.Close()
 
-	tw := tar.NewWriter(outFile)
-	defer tw.Close()
+	writers := make([]writerState, len(layers))
+	for i, l := range layers {
+		f, err := os.Create(l.OutputPath)
+		if err != nil {
+			return fmt.Errorf("creating layer output %s: %w", l.OutputPath, err)
+		}
+		defer f.Close()
+		tw := tar.NewWriter(f)
+		defer tw.Close()
+		writers[i] = writerState{file: f, tw: tw}
+	}
+
+	fallbackFile, err := os.Create(fallbackPath)
+	if err != nil {
+		return fmt.Errorf("creating fallback output: %w", err)
+	}
+	defer fallbackFile.Close()
+	fallbackTw := tar.NewWriter(fallbackFile)
+	defer fallbackTw.Close()
 
 	for _, f := range zr.File {
+		tw := fallbackTw
+		for i, l := range layers {
+			if strings.HasPrefix(f.Name, l.Prefix) {
+				tw = writers[i].tw
+				break
+			}
+		}
 		if err := writeEntry(tw, f); err != nil {
 			return fmt.Errorf("writing entry %s: %w", f.Name, err)
 		}

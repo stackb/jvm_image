@@ -1,8 +1,14 @@
-load("@rules_go//go:def.bzl", "go_library")
+load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
     name = "jartar",
     srcs = ["jartar.go"],
     importpath = "github.com/stackb/jvm_image/pkg/jartar",
     visibility = ["//visibility:public"],
+)
+
+go_test(
+    name = "jartar_test",
+    srcs = ["jartar_test.go"],
+    embed = [":jartar"],
 )

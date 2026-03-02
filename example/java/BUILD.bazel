@@ -5,9 +5,16 @@ java_binary(
     name = "hello",
     srcs = ["Main.java"],
     main_class = "example.java.Main",
+    deps = [
+        "@maven2//:com_google_guava_guava",
+    ],
 )
 
 jvm_image(
     name = "hello_image",
     binary = ":hello",
+    layers = [
+        "com/google/",
+        "example/",
+    ],
 )
