@@ -1,4 +1,4 @@
-load("@jvm_image//:jvm_image.bzl", "jvm_image")
+load("@jvm_image//:jvm_image_layers.bzl", "jvm_image_layers")
 load("@rules_java//java:java_binary.bzl", "java_binary")
 
 java_binary(
@@ -10,9 +10,9 @@ java_binary(
     ],
 )
 
-jvm_image(
+jvm_image_layers(
     name = "hello_image",
     binary = ":hello",
     maven_lock_file = "maven2_install.json",
-    max_layers = 2,
+    # max_layers = -1,
 )

@@ -101,7 +101,7 @@ def _group_artifacts(artifact_ids, max_groups):
     # max_groups is 0: no artifact layers at all.
     return []
 
-def jvm_image(
+def jvm_image_layers(
         name,
         binary,
         layers = [],
@@ -137,7 +137,7 @@ def jvm_image(
     else:
         deploy_jar = binary + "_deploy.jar"
 
-    _jvm_image(
+    _jvm_image_layers(
         name = name,
         binary = binary,
         deploy_jar = deploy_jar,
@@ -150,7 +150,7 @@ def jvm_image(
         **kwargs
     )
 
-def _jvm_image_impl(ctx):
+def _jvm_image_layers_impl(ctx):
     deploy_jar = ctx.file.deploy_jar
     outputs = []
     inputs = [deploy_jar]
@@ -217,14 +217,14 @@ def _jvm_image_impl(ctx):
         outputs = outputs,
         executable = ctx.executable._tool,
         arguments = [args],
-        mnemonic = "JvmImage",
+        mnemonic = "JvmImageLayers",
         progress_message = "Splitting deploy jar into layers: %s" % ctx.label,
     )
 
     return [DefaultInfo(files = depset(outputs))]
 
-_jvm_image = rule(
-    implementation = _jvm_image_impl,
+_jvm_image_layers = rule(
+    implementation = _jvm_image_layers_impl,
     attrs = {
         "binary": attr.label(
             mandatory = True,

@@ -242,11 +242,21 @@ func TestSplit_ArtifactLayers(t *testing.T) {
 	jsr305Path := filepath.Join(dir, "jsr305.tar")
 	lockFilePath := filepath.Join(dir, "lock.json")
 
+	// Include directory entries (as JARs typically do) to verify they route
+	// to artifact layers rather than leaking to the fallback.
 	createTestJar(t, jarPath, map[string]string{
 		"META-INF/MANIFEST.MF":                 "Manifest-Version: 1.0\n",
+		"com/":                                  "",
+		"com/google/":                           "",
+		"com/google/common/":                    "",
+		"com/google/common/collect/":            "",
 		"com/google/common/collect/Lists.class": "lists-bytes",
+		"com/google/common/base/":               "",
 		"com/google/common/base/Strings.class":  "strings-bytes",
+		"javax/":                                "",
+		"javax/annotation/":                     "",
 		"javax/annotation/Nonnull.class":        "nonnull-bytes",
+		"example/":                              "",
 		"example/Main.class":                    "main-bytes",
 	})
 
@@ -279,18 +289,24 @@ func TestSplit_ArtifactLayers(t *testing.T) {
 	if _, ok := guavaEntries["com/google/common/base/Strings.class"]; !ok {
 		t.Error("expected Strings.class in guava layer")
 	}
-	if len(guavaEntries) != 2 {
-		t.Errorf("guava layer: got %d entries, want 2: %v", len(guavaEntries), guavaEntries)
+	// Should also contain ancestor directory entries.
+	if _, ok := guavaEntries["com/google/common/collect/"]; !ok {
+		t.Error("expected com/google/common/collect/ dir in guava layer")
+	}
+	if _, ok := guavaEntries["com/google/common/base/"]; !ok {
+		t.Error("expected com/google/common/base/ dir in guava layer")
 	}
 
 	jsr305Entries := readTar(t, jsr305Path)
 	if _, ok := jsr305Entries["javax/annotation/Nonnull.class"]; !ok {
 		t.Error("expected Nonnull.class in jsr305 layer")
 	}
-	if len(jsr305Entries) != 1 {
-		t.Errorf("jsr305 layer: got %d entries, want 1: %v", len(jsr305Entries), jsr305Entries)
+	if _, ok := jsr305Entries["javax/annotation/"]; !ok {
+		t.Error("expected javax/annotation/ dir in jsr305 layer")
 	}
 
+	// Fallback should have META-INF, example dir + class.
+	// Shared ancestor dirs (com/, javax/) may go to an artifact layer.
 	fallbackEntries := readTar(t, fallbackPath)
 	if _, ok := fallbackEntries["META-INF/MANIFEST.MF"]; !ok {
 		t.Error("expected MANIFEST.MF in fallback")
@@ -298,8 +314,11 @@ func TestSplit_ArtifactLayers(t *testing.T) {
 	if _, ok := fallbackEntries["example/Main.class"]; !ok {
 		t.Error("expected Main.class in fallback")
 	}
-	if len(fallbackEntries) != 2 {
-		t.Errorf("fallback: got %d entries, want 2: %v", len(fallbackEntries), fallbackEntries)
+	// Verify no artifact files leaked to fallback.
+	for name := range fallbackEntries {
+		if strings.HasPrefix(name, "com/google/") || strings.HasPrefix(name, "javax/annotation/") {
+			t.Errorf("unexpected artifact entry %s in fallback tar", name)
+		}
 	}
 }
 

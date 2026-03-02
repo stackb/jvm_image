@@ -160,9 +160,11 @@ func resolveWriter(
 	}
 
 	// Check artifact-derived prefixes.
+	// Also check if the entry is an ancestor directory of a prefix
+	// (e.g. entry "com/google/" is ancestor of prefix "com/google/common/collect/").
 	if artifactPrefixMap != nil {
 		for prefix, tw := range artifactPrefixMap {
-			if strings.HasPrefix(name, prefix) {
+			if strings.HasPrefix(name, prefix) || strings.HasPrefix(prefix, name) {
 				return tw
 			}
 		}
