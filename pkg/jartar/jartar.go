@@ -3,6 +3,7 @@ package jartar
 import (
 	"archive/tar"
 	"archive/zip"
+	"bufio"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -17,6 +18,7 @@ type Layer struct {
 }
 
 // Artifact defines an artifact-based layer with its output path.
+// Multiple artifacts may share the same OutputPath when grouped.
 type Artifact struct {
 	ID         string // e.g. "com.google.guava:guava"
 	OutputPath string
@@ -27,6 +29,11 @@ type MavenLockFile struct {
 	Packages map[string][]string `json:"packages"`
 }
 
+// SplitResult contains metadata extracted during the split operation.
+type SplitResult struct {
+	MainClass string // e.g. "com.example.Main"
+}
+
 // SplitOptions configures how a JAR is split into layered tars.
 type SplitOptions struct {
 	InputPath         string
@@ -34,45 +41,55 @@ type SplitOptions struct {
 	Layers            []Layer
 	MavenLockFilePath string
 	Artifacts         []Artifact
+	PathPrefix        string // prefix prepended to tar entry paths, e.g. "app/"
+	EntrypointPath    string // path to write entrypoint shell script (optional)
+	AppPrefix         string // classpath prefix in container, e.g. "/app"
 }
 
 // Split reads a JAR file and distributes entries across layer tars.
 // Routing priority: explicit layers first, then artifact-derived prefixes, then fallback.
 // All output tars are always written, even if empty.
-func Split(opts SplitOptions) error {
+func Split(opts SplitOptions) (*SplitResult, error) {
 	zr, err := zip.OpenReader(opts.InputPath)
 	if err != nil {
-		return fmt.Errorf("opening jar: %w", err)
+		return nil, fmt.Errorf("opening jar: %w", err)
 	}
 	defer zr.Close()
 
-	// Build artifact prefix map if lock file is provided.
-	type artifactWriter struct {
-		tw *tar.Writer
+	// Extract Main-Class from manifest.
+	mainClass, err := parseMainClass(zr)
+	if err != nil {
+		return nil, err
 	}
+
+	// Build artifact prefix map if lock file is provided.
 	var artifactPrefixMap map[string]*tar.Writer // path prefix -> tar writer
-	var artifactWriters []writerState
 
 	if opts.MavenLockFilePath != "" && len(opts.Artifacts) > 0 {
 		lockFile, err := parseLockFile(opts.MavenLockFilePath)
 		if err != nil {
-			return err
+			return nil, err
 		}
 
 		artifactPrefixMap = make(map[string]*tar.Writer)
-		artifactWriters = make([]writerState, len(opts.Artifacts))
 
-		for i, a := range opts.Artifacts {
-			f, err := os.Create(a.OutputPath)
-			if err != nil {
-				return fmt.Errorf("creating artifact output %s: %w", a.OutputPath, err)
+		// Deduplicate writers by output path so grouped artifacts share one tar.
+		writersByPath := make(map[string]*tar.Writer)
+
+		for _, a := range opts.Artifacts {
+			tw, ok := writersByPath[a.OutputPath]
+			if !ok {
+				f, err := os.Create(a.OutputPath)
+				if err != nil {
+					return nil, fmt.Errorf("creating artifact output %s: %w", a.OutputPath, err)
+				}
+				defer f.Close()
+				tw = tar.NewWriter(f)
+				defer tw.Close()
+				writersByPath[a.OutputPath] = tw
 			}
-			defer f.Close()
-			tw := tar.NewWriter(f)
-			defer tw.Close()
-			artifactWriters[i] = writerState{file: f, tw: tw}
 
-			// Map each package prefix for this artifact to its tar writer.
+			// Map each package prefix for this artifact to the shared writer.
 			for _, pkg := range lockFile.Packages[a.ID] {
 				prefix := strings.ReplaceAll(pkg, ".", "/") + "/"
 				artifactPrefixMap[prefix] = tw
@@ -85,7 +102,7 @@ func Split(opts SplitOptions) error {
 	for i, l := range opts.Layers {
 		f, err := os.Create(l.OutputPath)
 		if err != nil {
-			return fmt.Errorf("creating layer output %s: %w", l.OutputPath, err)
+			return nil, fmt.Errorf("creating layer output %s: %w", l.OutputPath, err)
 		}
 		defer f.Close()
 		tw := tar.NewWriter(f)
@@ -96,7 +113,7 @@ func Split(opts SplitOptions) error {
 	// Open fallback tar writer.
 	fallbackFile, err := os.Create(opts.FallbackPath)
 	if err != nil {
-		return fmt.Errorf("creating fallback output: %w", err)
+		return nil, fmt.Errorf("creating fallback output: %w", err)
 	}
 	defer fallbackFile.Close()
 	fallbackTw := tar.NewWriter(fallbackFile)
@@ -104,12 +121,26 @@ func Split(opts SplitOptions) error {
 
 	for _, f := range zr.File {
 		tw := resolveWriter(f.Name, opts.Layers, layerWriters, artifactPrefixMap, fallbackTw)
-		if err := writeEntry(tw, f); err != nil {
-			return fmt.Errorf("writing entry %s: %w", f.Name, err)
+		if err := writeEntry(tw, f, opts.PathPrefix); err != nil {
+			return nil, fmt.Errorf("writing entry %s: %w", f.Name, err)
 		}
 	}
 
-	return nil
+	// Generate entrypoint script if requested.
+	if opts.EntrypointPath != "" {
+		if mainClass == "" {
+			return nil, fmt.Errorf("no Main-Class found in MANIFEST.MF; cannot generate entrypoint")
+		}
+		appPrefix := opts.AppPrefix
+		if appPrefix == "" {
+			appPrefix = "/app"
+		}
+		if err := writeEntrypoint(opts.EntrypointPath, appPrefix, mainClass); err != nil {
+			return nil, fmt.Errorf("writing entrypoint: %w", err)
+		}
+	}
+
+	return &SplitResult{MainClass: mainClass}, nil
 }
 
 // resolveWriter determines which tar writer should receive the given entry.
@@ -157,7 +188,57 @@ func parseLockFile(path string) (*MavenLockFile, error) {
 	return &lf, nil
 }
 
-func writeEntry(tw *tar.Writer, f *zip.File) error {
+// parseMainClass finds and extracts the Main-Class attribute from the JAR's
+// META-INF/MANIFEST.MF. Returns empty string if no manifest or no Main-Class.
+func parseMainClass(zr *zip.ReadCloser) (string, error) {
+	for _, f := range zr.File {
+		if f.Name == "META-INF/MANIFEST.MF" {
+			rc, err := f.Open()
+			if err != nil {
+				return "", fmt.Errorf("opening MANIFEST.MF: %w", err)
+			}
+			defer rc.Close()
+			data, err := io.ReadAll(rc)
+			if err != nil {
+				return "", fmt.Errorf("reading MANIFEST.MF: %w", err)
+			}
+			return extractMainClass(string(data)), nil
+		}
+	}
+	return "", nil
+}
+
+// extractMainClass parses a MANIFEST.MF body and returns the Main-Class value.
+// Handles the MANIFEST.MF continuation line format where lines >72 bytes are
+// split with a newline followed by a single leading space.
+func extractMainClass(manifest string) string {
+	// First, join continuation lines (lines starting with a single space).
+	var lines []string
+	scanner := bufio.NewScanner(strings.NewReader(manifest))
+	for scanner.Scan() {
+		line := scanner.Text()
+		if strings.HasPrefix(line, " ") && len(lines) > 0 {
+			lines[len(lines)-1] += line[1:] // append without the leading space
+		} else {
+			lines = append(lines, line)
+		}
+	}
+	for _, line := range lines {
+		if strings.HasPrefix(line, "Main-Class:") {
+			return strings.TrimSpace(strings.TrimPrefix(line, "Main-Class:"))
+		}
+	}
+	return ""
+}
+
+// writeEntrypoint generates a shell script that runs the exploded JAR
+// using java -cp.
+func writeEntrypoint(path, appPrefix, mainClass string) error {
+	script := fmt.Sprintf("#!/bin/sh\nexec java ${JAVA_OPTS} -cp %s %s \"$@\"\n", appPrefix, mainClass)
+	return os.WriteFile(path, []byte(script), 0755)
+}
+
+func writeEntry(tw *tar.Writer, f *zip.File, pathPrefix string) error {
 	info := f.FileInfo()
 	isDir := info.IsDir() || strings.HasSuffix(f.Name, "/")
 
@@ -171,7 +252,7 @@ func writeEntry(tw *tar.Writer, f *zip.File) error {
 	}
 
 	hdr := &tar.Header{
-		Name:    f.Name,
+		Name:    pathPrefix + f.Name,
 		ModTime: f.Modified,
 		Mode:    int64(mode.Perm()),
 	}

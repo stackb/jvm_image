@@ -21,10 +21,15 @@ func main() {
 	input := flag.String("input", "", "path to input JAR file")
 	output := flag.String("output", "", "path to fallback output tar file")
 	mavenLockFile := flag.String("maven_lock_file", "", "path to maven lock file JSON")
+	entrypoint := flag.String("entrypoint", "", "path to write entrypoint shell script")
+	appPrefix := flag.String("app_prefix", "/app", "classpath prefix in the container")
+	pathPrefix := flag.String("path_prefix", "", "prefix prepended to tar entry paths")
 	var outputLayers repeatedFlag
 	flag.Var(&outputLayers, "output_layer", "PREFIX=path.tar (repeatable)")
 	var artifacts repeatedFlag
 	flag.Var(&artifacts, "artifact", "ARTIFACT_ID=path.tar (repeatable)")
+	var artifactGroups repeatedFlag
+	flag.Var(&artifactGroups, "artifact_group", "ID1,ID2,...=path.tar (repeatable)")
 	flag.Parse()
 
 	if *input == "" || *output == "" {
@@ -36,6 +41,9 @@ func main() {
 		InputPath:         *input,
 		FallbackPath:      *output,
 		MavenLockFilePath: *mavenLockFile,
+		EntrypointPath:    *entrypoint,
+		AppPrefix:         *appPrefix,
+		PathPrefix:        *pathPrefix,
 	}
 
 	for _, ol := range outputLayers {
@@ -62,7 +70,27 @@ func main() {
 		})
 	}
 
-	if err := jartar.Split(opts); err != nil {
+	// --artifact_group=ID1,ID2,...=path.tar
+	// Multiple artifact IDs sharing the same output tar.
+	for _, ag := range artifactGroups {
+		ids, path, ok := strings.Cut(ag, "=")
+		if !ok || ids == "" || path == "" {
+			fmt.Fprintf(os.Stderr, "invalid --artifact_group value %q: expected ID1,ID2,...=path.tar\n", ag)
+			os.Exit(1)
+		}
+		for _, id := range strings.Split(ids, ",") {
+			id = strings.TrimSpace(id)
+			if id == "" {
+				continue
+			}
+			opts.Artifacts = append(opts.Artifacts, jartar.Artifact{
+				ID:         id,
+				OutputPath: path,
+			})
+		}
+	}
+
+	if _, err := jartar.Split(opts); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}

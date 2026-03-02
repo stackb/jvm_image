@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -92,7 +93,7 @@ func TestSplit_NoLayers(t *testing.T) {
 		"com/example/Main.class": "main-class-bytes",
 	})
 
-	if err := Split(SplitOptions{
+	if _, err := Split(SplitOptions{
 		InputPath:    jarPath,
 		FallbackPath: fallbackPath,
 	}); err != nil {
@@ -123,7 +124,7 @@ func TestSplit_WithLayers(t *testing.T) {
 		"org/other/Lib.class":                   "other-bytes",
 	})
 
-	if err := Split(SplitOptions{
+	if _, err := Split(SplitOptions{
 		InputPath:    jarPath,
 		FallbackPath: fallbackPath,
 		Layers: []Layer{
@@ -179,7 +180,7 @@ func TestSplit_EmptyLayers(t *testing.T) {
 		"com/example/Main.class": "main-class-bytes",
 	})
 
-	if err := Split(SplitOptions{
+	if _, err := Split(SplitOptions{
 		InputPath:    jarPath,
 		FallbackPath: fallbackPath,
 		Layers: []Layer{
@@ -211,7 +212,7 @@ func TestSplit_FirstMatchWins(t *testing.T) {
 		"com/google/common/base/Strings.class": "strings-bytes",
 	})
 
-	if err := Split(SplitOptions{
+	if _, err := Split(SplitOptions{
 		InputPath:    jarPath,
 		FallbackPath: fallbackPath,
 		Layers: []Layer{
@@ -259,7 +260,7 @@ func TestSplit_ArtifactLayers(t *testing.T) {
 		},
 	})
 
-	if err := Split(SplitOptions{
+	if _, err := Split(SplitOptions{
 		InputPath:         jarPath,
 		FallbackPath:      fallbackPath,
 		MavenLockFilePath: lockFilePath,
@@ -321,7 +322,7 @@ func TestSplit_ExplicitLayersTakePriorityOverArtifacts(t *testing.T) {
 	})
 
 	// Explicit layer with broader prefix should win over artifact.
-	if err := Split(SplitOptions{
+	if _, err := Split(SplitOptions{
 		InputPath:         jarPath,
 		FallbackPath:      fallbackPath,
 		MavenLockFilePath: lockFilePath,
@@ -360,7 +361,7 @@ func TestSplit_ArtifactNotInLockFile(t *testing.T) {
 	// Lock file has no packages for this artifact.
 	createLockFile(t, lockFilePath, map[string][]string{})
 
-	if err := Split(SplitOptions{
+	if _, err := Split(SplitOptions{
 		InputPath:         jarPath,
 		FallbackPath:      fallbackPath,
 		MavenLockFilePath: lockFilePath,
@@ -382,4 +383,227 @@ func TestSplit_ArtifactNotInLockFile(t *testing.T) {
 	if _, ok := fallbackEntries["com/example/Main.class"]; !ok {
 		t.Error("expected Main.class in fallback")
 	}
+}
+
+func TestExtractMainClass(t *testing.T) {
+	tests := []struct {
+		name     string
+		manifest string
+		want     string
+	}{
+		{
+			name:     "standard",
+			manifest: "Manifest-Version: 1.0\nMain-Class: com.example.Main\n",
+			want:     "com.example.Main",
+		},
+		{
+			name:     "with carriage return",
+			manifest: "Manifest-Version: 1.0\r\nMain-Class: com.example.Main\r\n",
+			want:     "com.example.Main",
+		},
+		{
+			name: "continuation line",
+			manifest: "Manifest-Version: 1.0\n" +
+				"Main-Class: com.example.very.long.package.name.MainApplicat\n" +
+				" ion\n",
+			want: "com.example.very.long.package.name.MainApplication",
+		},
+		{
+			name:     "missing main class",
+			manifest: "Manifest-Version: 1.0\n",
+			want:     "",
+		},
+		{
+			name:     "empty manifest",
+			manifest: "",
+			want:     "",
+		},
+		{
+			name:     "extra whitespace",
+			manifest: "Main-Class:   com.example.Main  \n",
+			want:     "com.example.Main",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := extractMainClass(tt.manifest)
+			if got != tt.want {
+				t.Errorf("extractMainClass() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestSplit_EntrypointGeneration(t *testing.T) {
+	dir := t.TempDir()
+	jarPath := filepath.Join(dir, "test.jar")
+	fallbackPath := filepath.Join(dir, "fallback.tar")
+	entrypointPath := filepath.Join(dir, "entrypoint.sh")
+
+	createTestJar(t, jarPath, map[string]string{
+		"META-INF/MANIFEST.MF":  "Manifest-Version: 1.0\nMain-Class: com.example.Main\n",
+		"com/example/Main.class": "main-class-bytes",
+	})
+
+	result, err := Split(SplitOptions{
+		InputPath:      jarPath,
+		FallbackPath:   fallbackPath,
+		EntrypointPath: entrypointPath,
+		AppPrefix:      "/app",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if result.MainClass != "com.example.Main" {
+		t.Errorf("MainClass = %q, want %q", result.MainClass, "com.example.Main")
+	}
+
+	// Verify entrypoint file content.
+	data, err := os.ReadFile(entrypointPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := string(data)
+	wantScript := "#!/bin/sh\nexec java ${JAVA_OPTS} -cp /app com.example.Main \"$@\"\n"
+	if script != wantScript {
+		t.Errorf("entrypoint script:\ngot:  %q\nwant: %q", script, wantScript)
+	}
+
+	// Verify file is executable.
+	info, err := os.Stat(entrypointPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm()&0111 == 0 {
+		t.Errorf("entrypoint should be executable, got mode %v", info.Mode().Perm())
+	}
+}
+
+func TestSplit_EntrypointNoManifest(t *testing.T) {
+	dir := t.TempDir()
+	jarPath := filepath.Join(dir, "test.jar")
+	fallbackPath := filepath.Join(dir, "fallback.tar")
+	entrypointPath := filepath.Join(dir, "entrypoint.sh")
+
+	createTestJar(t, jarPath, map[string]string{
+		"com/example/Main.class": "main-class-bytes",
+	})
+
+	_, err := Split(SplitOptions{
+		InputPath:      jarPath,
+		FallbackPath:   fallbackPath,
+		EntrypointPath: entrypointPath,
+	})
+	if err == nil {
+		t.Fatal("expected error when no MANIFEST.MF and entrypoint requested")
+	}
+	if !strings.Contains(err.Error(), "no Main-Class") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestSplit_PathPrefix(t *testing.T) {
+	dir := t.TempDir()
+	jarPath := filepath.Join(dir, "test.jar")
+	fallbackPath := filepath.Join(dir, "fallback.tar")
+
+	createTestJar(t, jarPath, map[string]string{
+		"META-INF/MANIFEST.MF":  "Manifest-Version: 1.0\n",
+		"com/example/Main.class": "main-class-bytes",
+	})
+
+	if _, err := Split(SplitOptions{
+		InputPath:    jarPath,
+		FallbackPath: fallbackPath,
+		PathPrefix:   "app/",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	entries := readTar(t, fallbackPath)
+	if _, ok := entries["app/META-INF/MANIFEST.MF"]; !ok {
+		t.Errorf("expected app/META-INF/MANIFEST.MF, got keys: %v", keys(entries))
+	}
+	if _, ok := entries["app/com/example/Main.class"]; !ok {
+		t.Errorf("expected app/com/example/Main.class, got keys: %v", keys(entries))
+	}
+}
+
+func TestSplit_GroupedArtifacts(t *testing.T) {
+	dir := t.TempDir()
+	jarPath := filepath.Join(dir, "test.jar")
+	fallbackPath := filepath.Join(dir, "fallback.tar")
+	groupPath := filepath.Join(dir, "google_group.tar")
+	lockFilePath := filepath.Join(dir, "lock.json")
+
+	createTestJar(t, jarPath, map[string]string{
+		"META-INF/MANIFEST.MF":                         "Manifest-Version: 1.0\n",
+		"com/google/common/collect/Lists.class":         "lists-bytes",
+		"com/google/common/util/concurrent/internal/InternalFutureFailureAccess.class": "fa-bytes",
+		"javax/annotation/Nonnull.class":                "nonnull-bytes",
+		"example/Main.class":                            "main-bytes",
+	})
+
+	createLockFile(t, lockFilePath, map[string][]string{
+		"com.google.guava:guava": {
+			"com.google.common.collect",
+		},
+		"com.google.guava:failureaccess": {
+			"com.google.common.util.concurrent.internal",
+		},
+		"com.google.code.findbugs:jsr305": {
+			"javax.annotation",
+		},
+	})
+
+	// Group guava + failureaccess + jsr305 all into one tar (simulating group_by_prefix).
+	// Multiple artifact IDs share the same OutputPath.
+	if _, err := Split(SplitOptions{
+		InputPath:         jarPath,
+		FallbackPath:      fallbackPath,
+		MavenLockFilePath: lockFilePath,
+		Artifacts: []Artifact{
+			{ID: "com.google.guava:guava", OutputPath: groupPath},
+			{ID: "com.google.guava:failureaccess", OutputPath: groupPath},
+			{ID: "com.google.code.findbugs:jsr305", OutputPath: groupPath},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// All three artifacts' classes should be in the shared group tar.
+	groupEntries := readTar(t, groupPath)
+	if _, ok := groupEntries["com/google/common/collect/Lists.class"]; !ok {
+		t.Error("expected Lists.class in group layer")
+	}
+	if _, ok := groupEntries["com/google/common/util/concurrent/internal/InternalFutureFailureAccess.class"]; !ok {
+		t.Error("expected InternalFutureFailureAccess.class in group layer")
+	}
+	if _, ok := groupEntries["javax/annotation/Nonnull.class"]; !ok {
+		t.Error("expected Nonnull.class in group layer")
+	}
+	if len(groupEntries) != 3 {
+		t.Errorf("group layer: got %d entries, want 3: %v", len(groupEntries), keys(groupEntries))
+	}
+
+	// Fallback should have only META-INF and example.
+	fallbackEntries := readTar(t, fallbackPath)
+	if _, ok := fallbackEntries["META-INF/MANIFEST.MF"]; !ok {
+		t.Error("expected MANIFEST.MF in fallback")
+	}
+	if _, ok := fallbackEntries["example/Main.class"]; !ok {
+		t.Error("expected Main.class in fallback")
+	}
+	if len(fallbackEntries) != 2 {
+		t.Errorf("fallback: got %d entries, want 2: %v", len(fallbackEntries), keys(fallbackEntries))
+	}
+}
+
+func keys(m map[string]string) []string {
+	result := make([]string, 0, len(m))
+	for k := range m {
+		result = append(result, k)
+	}
+	return result
 }
