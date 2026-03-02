@@ -1,0 +1,15 @@
+load("@rules_go//go:def.bzl", "go_binary", "go_library")
+
+go_library(
+    name = "executable_jar_splitter_lib",
+    srcs = ["main.go"],
+    importpath = "github.com/stackb/jvm_image/cmd/executable_jar_splitter",
+    visibility = ["//visibility:private"],
+    deps = ["//pkg/jartar"],
+)
+
+go_binary(
+    name = "executable_jar_splitter",
+    embed = [":executable_jar_splitter_lib"],
+    visibility = ["//visibility:public"],
+)

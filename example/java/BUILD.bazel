@@ -1,0 +1,13 @@
+load("@jvm_image//:jvm_image.bzl", "jvm_image")
+load("@rules_java//java:java_binary.bzl", "java_binary")
+
+java_binary(
+    name = "hello",
+    srcs = ["Main.java"],
+    main_class = "example.java.Main",
+)
+
+jvm_image(
+    name = "hello_image",
+    binary = ":hello",
+)

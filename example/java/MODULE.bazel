@@ -1,0 +1,11 @@
+module(
+    name = "example_java",
+    version = "0.0.0",
+)
+
+bazel_dep(name = "rules_java", version = "9.6.1")
+bazel_dep(name = "jvm_image", version = "0.0.0")
+local_path_override(
+    module_name = "jvm_image",
+    path = "../..",
+)
