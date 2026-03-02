@@ -94,8 +94,12 @@ def _group_artifacts(artifact_ids, max_groups):
         if len(group_order) <= max_groups:
             return [(key, groups[key]) for key in group_order]
 
-    # If still over limit with depth=1, just return what we have.
-    return [(key, groups[key]) for key in group_order]
+    # Final fallback: merge everything into one group.
+    if max_groups >= 1:
+        return [("all", sorted(artifact_ids))]
+
+    # max_groups is 0: no artifact layers at all.
+    return []
 
 def jvm_image(
         name,

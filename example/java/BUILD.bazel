@@ -14,5 +14,5 @@ jvm_image(
     name = "hello_image",
     binary = ":hello",
     maven_lock_file = "maven2_install.json",
-    max_layers = 0,
+    max_layers = 2,
 )
