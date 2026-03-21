@@ -1,0 +1,51 @@
+load("@jvm_image//:jvm_image_layers.bzl", "jvm_image_layers")
+load("@rules_img//img:image.bzl", "image_manifest")
+load("@rules_img//img:load.bzl", "image_load")
+load("@rules_java//java:java_binary.bzl", "java_binary")
+
+java_binary(
+    name = "hello",
+    srcs = ["Main.java"],
+    main_class = "example.hello.Main",
+    deps = ["@maven2//:com_google_guava_guava"],
+)
+
+jvm_image_layers(
+    name = "layers",
+    # max_layers = -1,
+    app_prefix = "/app",
+    binary = ":hello",
+    maven_lock_file = "maven2_install.json",
+)
+
+filegroup(
+    name = "entrypoint",
+    srcs = [":layers"],
+    output_group = "entrypoint",
+)
+
+image_manifest(
+    name = "image",
+    base = "@distroless_java//:image",
+    entrypoint = [
+        "java",
+        "-cp",
+        "/app",
+        "example.hello.Main",
+    ],
+    layers = [":layers"],
+    platform = "@rules_img//img/private/platforms:linux_amd64",
+    stamp = "auto",
+    working_dir = "/",
+)
+
+# ProTip: use containerd:
+# $ colima start --runtime containerd
+# $ colima status
+# export CONTAINERD_NAMESPACE=moby
+# $ CONTAINERD_ADDRESS=///Users/pcj/.colima/default/containerd.sock bazel run :load
+image_load(
+    name = "load",
+    image = ":image",
+    tag_list = ["example-hello:latest"],
+)

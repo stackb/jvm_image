@@ -1,0 +1,63 @@
+module(
+    name = "example_hello",
+    version = "0.0.0",
+)
+
+# ------------------------------------------------------------------
+# core deps
+# ------------------------------------------------------------------
+
+bazel_dep(name = "rules_img", version = "0.3.4")
+bazel_dep(name = "rules_java", version = "9.6.1")
+bazel_dep(name = "rules_jvm_external", version = "6.7")
+bazel_dep(name = "jvm_image", version = "0.0.0")
+local_path_override(
+    module_name = "jvm_image",
+    path = "../..",
+)
+
+# ------------------------------------------------------------------
+# @rules_java
+# ------------------------------------------------------------------
+
+compat_proxy = use_extension("@rules_java//java:rules_java_deps.bzl", "compatibility_proxy")
+use_repo(compat_proxy, "compatibility_proxy")
+
+toolchains = use_extension("@rules_java//java:extensions.bzl", "toolchains")
+
+use_repo(
+    toolchains,
+    "remotejdk25_linux_toolchain_config_repo",
+)
+
+register_toolchains(
+    "@remotejdk25_linux_toolchain_config_repo//:all",
+)
+
+# ------------------------------------------------------------------
+# @rules_jvm_external
+# ------------------------------------------------------------------
+
+maven = use_extension("@rules_jvm_external//:extensions.bzl", "maven")
+maven.install(
+    name = "maven2",
+    artifacts = [
+        "com.google.guava:guava:33.4.0-jre",
+    ],
+    lock_file = "maven2_install.json",
+)
+use_repo(maven, "maven2")
+
+# ------------------------------------------------------------------
+# @rules_img
+# ------------------------------------------------------------------
+
+pull = use_repo_rule("@rules_img//img:pull.bzl", "pull")
+
+pull(
+    name = "distroless_java",
+    digest = "sha256:4eadd00d3bff73e6a7491dd36653c1d318ac93fb1fb2cd5eef768fd2b4238408",
+    registry = "gcr.io",
+    repository = "distroless/java25-debian13",
+    tag = "nonroot",
+)

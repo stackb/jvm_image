@@ -162,7 +162,6 @@ def _jvm_image_layers_impl(ctx):
     args.add("--entrypoint", entrypoint)
     args.add("--app_prefix", ctx.attr.app_prefix)
     args.add("--path_prefix", ctx.attr.path_prefix)
-    outputs.append(entrypoint)
 
     # Fallback output tar (entries not matching any layer or artifact prefix).
     fallback = ctx.actions.declare_file(ctx.label.name + ".tar")
@@ -214,14 +213,19 @@ def _jvm_image_layers_impl(ctx):
 
     ctx.actions.run(
         inputs = inputs,
-        outputs = outputs,
+        outputs = outputs + [entrypoint],
         executable = ctx.executable._tool,
         arguments = [args],
         mnemonic = "JvmImageLayers",
         progress_message = "Splitting deploy jar into layers: %s" % ctx.label,
     )
 
-    return [DefaultInfo(files = depset(outputs))]
+    return [
+        DefaultInfo(files = depset(outputs)),
+        OutputGroupInfo(
+            entrypoint = depset([entrypoint]),
+        ),
+    ]
 
 _jvm_image_layers = rule(
     implementation = _jvm_image_layers_impl,
@@ -234,7 +238,7 @@ _jvm_image_layers = rule(
         "deploy_jar": attr.label(
             mandatory = True,
             allow_single_file = [".jar"],
-            doc = "The _deploy.jar implicit output of the binary.",
+            doc = "The _deploy.jar implicit output of the java_ or scala_binary.",
         ),
         "layers": attr.string_list(
             default = [],
@@ -254,8 +258,8 @@ _jvm_image_layers = rule(
             doc = "Strategy when artifacts exceed max_layers: 'truncate' or 'group_by_prefix'.",
         ),
         "app_prefix": attr.string(
-            default = "/app",
             doc = "Classpath prefix inside the container.",
+            mandatory = True,
         ),
         "path_prefix": attr.string(
             default = "app/",

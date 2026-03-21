@@ -619,6 +619,154 @@ func TestSplit_GroupedArtifacts(t *testing.T) {
 	}
 }
 
+// readTarHeaders reads a tar file and returns a map of entry name -> tar header.
+func readTarHeaders(t *testing.T, path string) map[string]*tar.Header {
+	t.Helper()
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+
+	result := make(map[string]*tar.Header)
+	tr := tar.NewReader(f)
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		result[hdr.Name] = hdr
+	}
+	return result
+}
+
+func TestSplit_DirectoryPermissions(t *testing.T) {
+	dir := t.TempDir()
+	jarPath := filepath.Join(dir, "test.jar")
+	fallbackPath := filepath.Join(dir, "fallback.tar")
+
+	// ZIP directory entries typically have mode bits that include os.ModeDir
+	// but zero permission bits. The splitter must ensure directories get 0755.
+	createTestJar(t, jarPath, map[string]string{
+		"META-INF/":             "",
+		"META-INF/MANIFEST.MF":  "Manifest-Version: 1.0\n",
+		"com/":                   "",
+		"com/example/":           "",
+		"com/example/Main.class": "main-class-bytes",
+	})
+
+	if _, err := Split(SplitOptions{
+		InputPath:    jarPath,
+		FallbackPath: fallbackPath,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	headers := readTarHeaders(t, fallbackPath)
+
+	// Verify directory entries have execute bit set.
+	for _, dirName := range []string{"META-INF/", "com/", "com/example/"} {
+		hdr, ok := headers[dirName]
+		if !ok {
+			t.Errorf("missing directory entry %s", dirName)
+			continue
+		}
+		mode := os.FileMode(hdr.Mode)
+		if mode&0111 == 0 {
+			t.Errorf("directory %s has no execute bit: %04o", dirName, mode)
+		}
+	}
+
+	// Verify regular file entries preserve their permissions from the ZIP.
+	for _, fileName := range []string{"META-INF/MANIFEST.MF", "com/example/Main.class"} {
+		hdr, ok := headers[fileName]
+		if !ok {
+			t.Errorf("missing file entry %s", fileName)
+			continue
+		}
+		mode := os.FileMode(hdr.Mode)
+		if mode&0400 == 0 {
+			t.Errorf("file %s is not readable: %04o", fileName, mode)
+		}
+	}
+}
+
+func TestSplit_DirectoryPermissionsWithPathPrefix(t *testing.T) {
+	dir := t.TempDir()
+	jarPath := filepath.Join(dir, "test.jar")
+	fallbackPath := filepath.Join(dir, "fallback.tar")
+
+	createTestJar(t, jarPath, map[string]string{
+		"com/":                   "",
+		"com/example/":           "",
+		"com/example/Main.class": "main-class-bytes",
+	})
+
+	if _, err := Split(SplitOptions{
+		InputPath:    jarPath,
+		FallbackPath: fallbackPath,
+		PathPrefix:   "app/",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	headers := readTarHeaders(t, fallbackPath)
+
+	for _, dirName := range []string{"app/com/", "app/com/example/"} {
+		hdr, ok := headers[dirName]
+		if !ok {
+			t.Errorf("missing directory entry %s", dirName)
+			continue
+		}
+		mode := os.FileMode(hdr.Mode)
+		if mode&0111 == 0 {
+			t.Errorf("directory %s has no execute bit: %04o", dirName, mode)
+		}
+	}
+}
+
+func TestSplit_DirectoryPermissionsInLayers(t *testing.T) {
+	dir := t.TempDir()
+	jarPath := filepath.Join(dir, "test.jar")
+	fallbackPath := filepath.Join(dir, "fallback.tar")
+	layerPath := filepath.Join(dir, "layer.tar")
+
+	createTestJar(t, jarPath, map[string]string{
+		"com/":                                  "",
+		"com/google/":                           "",
+		"com/google/common/":                    "",
+		"com/google/common/collect/":            "",
+		"com/google/common/collect/Lists.class": "lists-bytes",
+	})
+
+	if _, err := Split(SplitOptions{
+		InputPath:    jarPath,
+		FallbackPath: fallbackPath,
+		Layers: []Layer{
+			{Prefix: "com/google/", OutputPath: layerPath},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	headers := readTarHeaders(t, layerPath)
+
+	for _, dirName := range []string{"com/google/", "com/google/common/", "com/google/common/collect/"} {
+		hdr, ok := headers[dirName]
+		if !ok {
+			t.Errorf("missing directory entry %s in layer", dirName)
+			continue
+		}
+		mode := os.FileMode(hdr.Mode)
+		if mode&0111 == 0 {
+			t.Errorf("directory %s in layer has no execute bit: %04o", dirName, mode)
+		}
+	}
+}
+
 func keys(m map[string]string) []string {
 	result := make([]string, 0, len(m))
 	for k := range m {

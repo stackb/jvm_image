@@ -244,19 +244,24 @@ func writeEntry(tw *tar.Writer, f *zip.File, pathPrefix string) error {
 	info := f.FileInfo()
 	isDir := info.IsDir() || strings.HasSuffix(f.Name, "/")
 
-	mode := info.Mode()
-	if mode == 0 {
-		if isDir {
-			mode = 0755
+	perm := info.Mode().Perm()
+	if isDir {
+		// Ensure directories always have execute bits set.
+		// ZIP entries from jar tools often have zero or read-only permissions
+		// for directories, which prevents traversal when extracted.
+		if perm == 0 {
+			perm = 0755
 		} else {
-			mode = 0644
+			perm |= 0111
 		}
+	} else if perm == 0 {
+		perm = 0644
 	}
 
 	hdr := &tar.Header{
 		Name:    pathPrefix + f.Name,
 		ModTime: f.Modified,
-		Mode:    int64(mode.Perm()),
+		Mode:    int64(perm),
 	}
 
 	if isDir {

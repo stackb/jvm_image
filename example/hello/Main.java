@@ -1,4 +1,4 @@
-package example.java;
+package example.hello;
 
 import com.google.common.collect.ImmutableList;
 
