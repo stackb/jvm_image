@@ -1,0 +1,14 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "jarlayer",
+    srcs = ["jarlayer.go"],
+    importpath = "github.com/stackb/jvm_image/pkg/jarlayer",
+    visibility = ["//visibility:public"],
+)
+
+go_test(
+    name = "jarlayer_test",
+    srcs = ["jarlayer_test.go"],
+    embed = [":jarlayer"],
+)

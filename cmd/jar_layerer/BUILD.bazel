@@ -1,0 +1,15 @@
+load("@rules_go//go:def.bzl", "go_binary", "go_library")
+
+go_library(
+    name = "jar_layerer_lib",
+    srcs = ["main.go"],
+    importpath = "github.com/stackb/jvm_image/cmd/jar_layerer",
+    visibility = ["//visibility:private"],
+    deps = ["//pkg/jarlayer"],
+)
+
+go_binary(
+    name = "jar_layerer",
+    embed = [":jar_layerer_lib"],
+    visibility = ["//visibility:public"],
+)

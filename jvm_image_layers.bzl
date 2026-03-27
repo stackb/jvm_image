@@ -1,4 +1,11 @@
-"""Rule for converting a JVM binary's deploy jar into layered tarballs."""
+"""Rules for converting JVM binaries into layered container tarballs.
+
+Two strategies are provided:
+- jvm_image_layers: Explodes a deploy jar into loose files (fast, but loses
+  duplicate resources like reference.conf).
+- jvm_jar_layers: Keeps individual dependency JARs intact in the container
+  (preserves all resources, identical runtime behavior to bazel run).
+"""
 
 MavenDepsInfo = provider(
     doc = "Collects maven artifact IDs from jvm_import dependencies.",
@@ -270,6 +277,167 @@ _jvm_image_layers = rule(
             executable = True,
             cfg = "exec",
             doc = "The executable_jar_splitter Go binary.",
+        ),
+    },
+)
+
+# ---------------------------------------------------------------------------
+# jvm_jar_layers: Keep individual JARs intact (preserves reference.conf etc.)
+# ---------------------------------------------------------------------------
+
+def jvm_jar_layers(
+        name,
+        binary,
+        maven_lock_file = None,
+        max_layers = 121,
+        layer_strategy = "group_by_prefix",
+        app_prefix = "/app/lib",
+        path_prefix = "app/lib/",
+        **kwargs):
+    """Creates layered tarballs containing individual dependency JARs.
+
+    Unlike jvm_image_layers which explodes the deploy jar into loose files,
+    this rule preserves each dependency JAR intact. This avoids resource
+    merge conflicts (reference.conf, META-INF/services/*) that occur when
+    singlejar merges duplicate entries.
+
+    The container classpath uses Java's @file syntax to reference a classpath
+    file listing all JARs.
+
+    Args:
+        name: target name
+        binary: label of a java_binary or scala_binary target
+        maven_lock_file: optional label of a maven lock file JSON for
+            artifact-based layer grouping.
+        max_layers: maximum number of artifact layers (default 121).
+        layer_strategy: strategy when artifacts exceed max_layers.
+        app_prefix: classpath prefix inside the container (default "/app/lib").
+        path_prefix: prefix prepended to tar entry paths (default "app/lib/").
+        **kwargs: additional arguments passed to the underlying rule
+    """
+    _jvm_jar_layers(
+        name = name,
+        binary = binary,
+        maven_lock_file = maven_lock_file,
+        max_layers = max_layers,
+        layer_strategy = layer_strategy,
+        app_prefix = app_prefix,
+        path_prefix = path_prefix,
+        **kwargs
+    )
+
+def _jvm_jar_layers_impl(ctx):
+    # Collect all runtime JARs from the binary's JavaInfo.
+    runtime_jars = ctx.attr.binary[JavaInfo].transitive_runtime_jars.to_list()
+
+    # Write a file listing all JAR paths for the tool to read.
+    jar_list = ctx.actions.declare_file(ctx.label.name + "_jars.txt")
+    ctx.actions.write(
+        output = jar_list,
+        content = "\n".join([jar.path for jar in runtime_jars]),
+    )
+
+    tar_outputs = []
+    inputs = list(runtime_jars) + [jar_list]
+    args = ctx.actions.args()
+    args.add("--jar_list", jar_list)
+    args.add("--app_prefix", ctx.attr.app_prefix)
+    args.add("--path_prefix", ctx.attr.path_prefix)
+
+    # Classpath file (not a tar — kept separate from tar outputs).
+    classpath_file = ctx.actions.declare_file(ctx.label.name + "_classpath")
+    args.add("--classpath", classpath_file)
+
+    # Fallback output tar.
+    fallback = ctx.actions.declare_file(ctx.label.name + ".tar")
+    args.add("--fallback", fallback)
+    tar_outputs.append(fallback)
+
+    # Maven artifact layers via aspect.
+    if ctx.file.maven_lock_file:
+        lock_file = ctx.file.maven_lock_file
+        inputs.append(lock_file)
+        args.add("--maven_lock_file", lock_file)
+
+        artifact_ids = sorted(ctx.attr.binary[MavenDepsInfo].artifacts.to_list())
+        available_slots = ctx.attr.max_layers
+        strategy = ctx.attr.layer_strategy
+
+        if len(artifact_ids) <= available_slots:
+            for artifact_id in artifact_ids:
+                sanitized = _sanitize_artifact_id(artifact_id)
+                artifact_out = ctx.actions.declare_file(ctx.label.name + ".maven." + sanitized + ".tar")
+                args.add("--artifact_layer", artifact_id + "=" + artifact_out.path)
+                tar_outputs.append(artifact_out)
+        elif strategy == "truncate":
+            for artifact_id in artifact_ids[:available_slots]:
+                sanitized = _sanitize_artifact_id(artifact_id)
+                artifact_out = ctx.actions.declare_file(ctx.label.name + ".maven." + sanitized + ".tar")
+                args.add("--artifact_layer", artifact_id + "=" + artifact_out.path)
+                tar_outputs.append(artifact_out)
+        elif strategy == "group_by_prefix":
+            groups = _group_artifacts(artifact_ids, available_slots)
+            for group_name, group_ids in groups:
+                sanitized = _sanitize_artifact_id(group_name)
+                group_out = ctx.actions.declare_file(ctx.label.name + ".maven." + sanitized + ".tar")
+                if len(group_ids) == 1:
+                    args.add("--artifact_layer", group_ids[0] + "=" + group_out.path)
+                else:
+                    args.add("--artifact_group_layer", ",".join(group_ids) + "=" + group_out.path)
+                tar_outputs.append(group_out)
+
+    ctx.actions.run(
+        inputs = inputs,
+        outputs = tar_outputs + [classpath_file],
+        executable = ctx.executable._tool,
+        arguments = [args],
+        mnemonic = "JvmJarLayers",
+        progress_message = "Layering JARs: %s" % ctx.label,
+    )
+
+    # DefaultInfo only includes tar files — the classpath file is a plain text
+    # file and must not be passed to container_image's tars attribute.
+    return [
+        DefaultInfo(files = depset(tar_outputs)),
+        OutputGroupInfo(
+            classpath = depset([classpath_file]),
+        ),
+    ]
+
+_jvm_jar_layers = rule(
+    implementation = _jvm_jar_layers_impl,
+    attrs = {
+        "binary": attr.label(
+            mandatory = True,
+            aspects = [_maven_deps_aspect],
+            doc = "The java_binary or scala_binary target.",
+        ),
+        "maven_lock_file": attr.label(
+            allow_single_file = [".json"],
+            doc = "Maven lock file JSON for artifact-based layer grouping.",
+        ),
+        "max_layers": attr.int(
+            default = 121,
+            doc = "Maximum number of artifact layers.",
+        ),
+        "layer_strategy": attr.string(
+            default = "group_by_prefix",
+            values = ["truncate", "group_by_prefix"],
+            doc = "Strategy when artifacts exceed max_layers.",
+        ),
+        "app_prefix": attr.string(
+            default = "/app/lib",
+            doc = "Classpath prefix inside the container.",
+        ),
+        "path_prefix": attr.string(
+            default = "app/lib/",
+            doc = "Path prefix prepended to tar entry names.",
+        ),
+        "_tool": attr.label(
+            default = "//cmd/jar_layerer",
+            executable = True,
+            cfg = "exec",
+            doc = "The jar_layerer Go binary.",
         ),
     },
 )
