@@ -4,8 +4,10 @@ Two strategies are provided:
 - jvm_image_layers: Explodes a deploy jar into loose files (fast, but loses
   duplicate resources like reference.conf).
 - jvm_jar_layers: Keeps individual dependency JARs intact in the container
-  (preserves all resources, identical runtime behavior to bazel run).
+  (preserves the normal multi-JAR resource layout).
 """
+
+load("@rules_java//java/common:java_info.bzl", "JavaInfo")
 
 MavenDepsInfo = provider(
     doc = "Collects maven artifact IDs from jvm_import dependencies.",
@@ -14,7 +16,7 @@ MavenDepsInfo = provider(
     },
 )
 
-def _maven_deps_aspect_impl(target, ctx):
+def _maven_deps_aspect_impl(_target, ctx):
     artifacts = []
 
     # Check tags for maven_coordinates.
@@ -51,6 +53,44 @@ def _sanitize_prefix(prefix):
 def _sanitize_artifact_id(artifact_id):
     """Convert an artifact ID to a safe filename component."""
     return artifact_id.replace(":", "_")
+
+def _validate_options(max_layers, app_prefix, path_prefix):
+    """Validate arguments shared by both public macros."""
+    if max_layers < 0:
+        fail("max_layers must be greater than or equal to zero")
+    if not app_prefix.startswith("/"):
+        fail("app_prefix must be an absolute container path")
+    if ".." in app_prefix.split("/") or ":" in app_prefix or "\\" in app_prefix:
+        fail("app_prefix must be a safe absolute container path without ':'")
+    if " " in app_prefix or "\t" in app_prefix or "\n" in app_prefix or "\r" in app_prefix:
+        fail("app_prefix must not contain whitespace")
+    if path_prefix.startswith("/") or ".." in path_prefix.split("/"):
+        fail("path_prefix must be relative and must not contain '..'")
+    if path_prefix and not path_prefix.endswith("/"):
+        fail("non-empty path_prefix must end with '/'")
+
+def _validate_layer_prefixes(layers):
+    seen = {}
+    for prefix in layers:
+        if not prefix:
+            fail("layer prefixes must not be empty")
+        if prefix.startswith("/") or ".." in prefix.split("/") or "\\" in prefix:
+            fail("layer prefix %r must be a safe relative archive path" % prefix)
+        if prefix in seen:
+            fail("duplicate layer prefix %r" % prefix)
+        seen[prefix] = True
+
+def _deploy_jar_label(binary):
+    """Return the implicit deploy-JAR label for a binary label string."""
+    if type(binary) != "string":
+        fail("binary must be a label string so its deploy JAR can be derived")
+    if ":" in binary:
+        pkg, _, target_name = binary.rpartition(":")
+        return pkg + ":" + target_name + "_deploy.jar"
+    if binary.startswith("//") or binary.startswith("@"):
+        target_name = binary.split("/")[-1]
+        return binary + ":" + target_name + "_deploy.jar"
+    return binary + "_deploy.jar"
 
 def _group_key(artifact_id, depth):
     """Extract a grouping key from an artifact ID at the given depth.
@@ -138,16 +178,13 @@ def jvm_image_layers(
         path_prefix: prefix prepended to tar entry paths (default "app/").
         **kwargs: additional arguments passed to the underlying rule
     """
-    if ":" in binary:
-        pkg, _, target_name = binary.rpartition(":")
-        deploy_jar = pkg + ":" + target_name + "_deploy.jar"
-    else:
-        deploy_jar = binary + "_deploy.jar"
+    _validate_options(max_layers, app_prefix, path_prefix)
+    _validate_layer_prefixes(layers)
 
     _jvm_image_layers(
         name = name,
         binary = binary,
-        deploy_jar = deploy_jar,
+        deploy_jar = _deploy_jar_label(binary),
         layers = layers,
         maven_lock_file = maven_lock_file,
         max_layers = max_layers,
@@ -176,9 +213,9 @@ def _jvm_image_layers_impl(ctx):
     outputs.append(fallback)
 
     # Per-layer output tars (explicit prefix layers).
-    for prefix in ctx.attr.layers:
+    for index, prefix in enumerate(ctx.attr.layers):
         sanitized = _sanitize_prefix(prefix)
-        layer_out = ctx.actions.declare_file(ctx.label.name + "." + sanitized + ".tar")
+        layer_out = ctx.actions.declare_file(ctx.label.name + ".explicit_%d.%s.tar" % (index, sanitized))
         args.add("--output_layer", prefix + "=" + layer_out.path)
         outputs.append(layer_out)
 
@@ -189,29 +226,29 @@ def _jvm_image_layers_impl(ctx):
         args.add("--maven_lock_file", lock_file)
 
         artifact_ids = sorted(ctx.attr.binary[MavenDepsInfo].artifacts.to_list())
-        available_slots = ctx.attr.max_layers - len(ctx.attr.layers)
+        available_slots = ctx.attr.max_layers
         strategy = ctx.attr.layer_strategy
 
         if len(artifact_ids) <= available_slots:
             # Under the limit: one layer per artifact.
-            for artifact_id in artifact_ids:
+            for index, artifact_id in enumerate(artifact_ids):
                 sanitized = _sanitize_artifact_id(artifact_id)
-                artifact_out = ctx.actions.declare_file(ctx.label.name + ".maven." + sanitized + ".tar")
+                artifact_out = ctx.actions.declare_file(ctx.label.name + ".maven_%d." % index + sanitized + ".tar")
                 args.add("--artifact", artifact_id + "=" + artifact_out.path)
                 outputs.append(artifact_out)
         elif strategy == "truncate":
             # Truncate: first N artifacts get layers, rest fall to fallback.
-            for artifact_id in artifact_ids[:available_slots]:
+            for index, artifact_id in enumerate(artifact_ids[:available_slots]):
                 sanitized = _sanitize_artifact_id(artifact_id)
-                artifact_out = ctx.actions.declare_file(ctx.label.name + ".maven." + sanitized + ".tar")
+                artifact_out = ctx.actions.declare_file(ctx.label.name + ".maven_%d." % index + sanitized + ".tar")
                 args.add("--artifact", artifact_id + "=" + artifact_out.path)
                 outputs.append(artifact_out)
         elif strategy == "group_by_prefix":
             # Group by Maven group prefix.
             groups = _group_artifacts(artifact_ids, available_slots)
-            for group_name, group_ids in groups:
+            for index, (group_name, group_ids) in enumerate(groups):
                 sanitized = _sanitize_artifact_id(group_name)
-                group_out = ctx.actions.declare_file(ctx.label.name + ".maven." + sanitized + ".tar")
+                group_out = ctx.actions.declare_file(ctx.label.name + ".maven_%d." % index + sanitized + ".tar")
                 if len(group_ids) == 1:
                     args.add("--artifact", group_ids[0] + "=" + group_out.path)
                 else:
@@ -315,6 +352,8 @@ def jvm_jar_layers(
         path_prefix: prefix prepended to tar entry paths (default "app/lib/").
         **kwargs: additional arguments passed to the underlying rule
     """
+    _validate_options(max_layers, app_prefix, path_prefix)
+
     _jvm_jar_layers(
         name = name,
         binary = binary,
@@ -364,22 +403,22 @@ def _jvm_jar_layers_impl(ctx):
         strategy = ctx.attr.layer_strategy
 
         if len(artifact_ids) <= available_slots:
-            for artifact_id in artifact_ids:
+            for index, artifact_id in enumerate(artifact_ids):
                 sanitized = _sanitize_artifact_id(artifact_id)
-                artifact_out = ctx.actions.declare_file(ctx.label.name + ".maven." + sanitized + ".tar")
+                artifact_out = ctx.actions.declare_file(ctx.label.name + ".maven_%d." % index + sanitized + ".tar")
                 args.add("--artifact_layer", artifact_id + "=" + artifact_out.path)
                 tar_outputs.append(artifact_out)
         elif strategy == "truncate":
-            for artifact_id in artifact_ids[:available_slots]:
+            for index, artifact_id in enumerate(artifact_ids[:available_slots]):
                 sanitized = _sanitize_artifact_id(artifact_id)
-                artifact_out = ctx.actions.declare_file(ctx.label.name + ".maven." + sanitized + ".tar")
+                artifact_out = ctx.actions.declare_file(ctx.label.name + ".maven_%d." % index + sanitized + ".tar")
                 args.add("--artifact_layer", artifact_id + "=" + artifact_out.path)
                 tar_outputs.append(artifact_out)
         elif strategy == "group_by_prefix":
             groups = _group_artifacts(artifact_ids, available_slots)
-            for group_name, group_ids in groups:
+            for index, (group_name, group_ids) in enumerate(groups):
                 sanitized = _sanitize_artifact_id(group_name)
-                group_out = ctx.actions.declare_file(ctx.label.name + ".maven." + sanitized + ".tar")
+                group_out = ctx.actions.declare_file(ctx.label.name + ".maven_%d." % index + sanitized + ".tar")
                 if len(group_ids) == 1:
                     args.add("--artifact_layer", group_ids[0] + "=" + group_out.path)
                 else:

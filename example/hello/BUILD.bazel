@@ -12,7 +12,6 @@ java_binary(
 
 jvm_image_layers(
     name = "layers",
-    # max_layers = -1,
     app_prefix = "/app",
     binary = ":hello",
     maven_lock_file = "maven2_install.json",

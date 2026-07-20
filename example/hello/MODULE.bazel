@@ -10,7 +10,7 @@ module(
 bazel_dep(name = "rules_img", version = "0.3.4")
 bazel_dep(name = "rules_java", version = "9.6.1")
 bazel_dep(name = "rules_jvm_external", version = "6.7")
-bazel_dep(name = "jvm_image", version = "0.0.0")
+bazel_dep(name = "jvm_image", version = "0.1.0")
 local_path_override(
     module_name = "jvm_image",
     path = "../..",
@@ -24,7 +24,6 @@ compat_proxy = use_extension("@rules_java//java:rules_java_deps.bzl", "compatibi
 use_repo(compat_proxy, "compatibility_proxy")
 
 toolchains = use_extension("@rules_java//java:extensions.bzl", "toolchains")
-
 use_repo(
     toolchains,
     "remotejdk25_linux_toolchain_config_repo",

@@ -1,3 +1,4 @@
+// Package jartar splits an executable JAR into OCI-compatible tar layers.
 package jartar
 
 import (
@@ -5,9 +6,13 @@ import (
 	"archive/zip"
 	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
+	"path"
+	"sort"
 	"strings"
 )
 
@@ -49,7 +54,11 @@ type SplitOptions struct {
 // Split reads a JAR file and distributes entries across layer tars.
 // Routing priority: explicit layers first, then artifact-derived prefixes, then fallback.
 // All output tars are always written, even if empty.
-func Split(opts SplitOptions) (*SplitResult, error) {
+func Split(opts SplitOptions) (result *SplitResult, retErr error) {
+	if err := validateOptions(opts); err != nil {
+		return nil, err
+	}
+
 	zr, err := zip.OpenReader(opts.InputPath)
 	if err != nil {
 		return nil, fmt.Errorf("opening jar: %w", err)
@@ -63,7 +72,18 @@ func Split(opts SplitOptions) (*SplitResult, error) {
 	}
 
 	// Build artifact prefix map if lock file is provided.
-	var artifactPrefixMap map[string]*tar.Writer // path prefix -> tar writer
+	var artifactRoutes []artifactRoute
+	var openWriters []*writerState
+	defer func() {
+		var closeErr error
+		for i := len(openWriters) - 1; i >= 0; i-- {
+			closeErr = errors.Join(closeErr, openWriters[i].Close())
+		}
+		if closeErr != nil {
+			result = nil
+			retErr = errors.Join(retErr, fmt.Errorf("closing output tar: %w", closeErr))
+		}
+	}()
 
 	if opts.MavenLockFilePath != "" && len(opts.Artifacts) > 0 {
 		lockFile, err := parseLockFile(opts.MavenLockFilePath)
@@ -71,56 +91,71 @@ func Split(opts SplitOptions) (*SplitResult, error) {
 			return nil, err
 		}
 
-		artifactPrefixMap = make(map[string]*tar.Writer)
-
 		// Deduplicate writers by output path so grouped artifacts share one tar.
-		writersByPath := make(map[string]*tar.Writer)
+		writersByPath := make(map[string]*writerState)
+		routesByPrefix := make(map[string]artifactRoute)
 
 		for _, a := range opts.Artifacts {
-			tw, ok := writersByPath[a.OutputPath]
+			lw, ok := writersByPath[a.OutputPath]
 			if !ok {
-				f, err := os.Create(a.OutputPath)
+				lw, err = newWriterState(a.OutputPath)
 				if err != nil {
 					return nil, fmt.Errorf("creating artifact output %s: %w", a.OutputPath, err)
 				}
-				defer f.Close()
-				tw = tar.NewWriter(f)
-				defer tw.Close()
-				writersByPath[a.OutputPath] = tw
+				writersByPath[a.OutputPath] = lw
+				openWriters = append(openWriters, lw)
 			}
 
 			// Map each package prefix for this artifact to the shared writer.
 			for _, pkg := range lockFile.Packages[a.ID] {
 				prefix := strings.ReplaceAll(pkg, ".", "/") + "/"
-				artifactPrefixMap[prefix] = tw
+				if err := validateArchivePath(prefix, true); err != nil {
+					return nil, fmt.Errorf("invalid package %q for artifact %q: %w", pkg, a.ID, err)
+				}
+				route := artifactRoute{prefix: prefix, outputPath: a.OutputPath, tw: lw.tw}
+				if existing, ok := routesByPrefix[prefix]; ok {
+					if existing.outputPath == "" || existing.outputPath == route.outputPath {
+						continue
+					}
+					// Split packages cannot be attributed safely after a deploy JAR
+					// has been merged. Keep them in the fallback layer.
+					routesByPrefix[prefix] = artifactRoute{prefix: prefix}
+					continue
+				}
+				routesByPrefix[prefix] = route
 			}
 		}
+		for _, route := range routesByPrefix {
+			artifactRoutes = append(artifactRoutes, route)
+		}
+		sort.Slice(artifactRoutes, func(i, j int) bool {
+			if len(artifactRoutes[i].prefix) != len(artifactRoutes[j].prefix) {
+				return len(artifactRoutes[i].prefix) > len(artifactRoutes[j].prefix)
+			}
+			return artifactRoutes[i].prefix < artifactRoutes[j].prefix
+		})
 	}
 
 	// Open explicit layer tar writers.
-	layerWriters := make([]writerState, len(opts.Layers))
+	layerWriters := make([]*writerState, len(opts.Layers))
 	for i, l := range opts.Layers {
-		f, err := os.Create(l.OutputPath)
+		lw, err := newWriterState(l.OutputPath)
 		if err != nil {
 			return nil, fmt.Errorf("creating layer output %s: %w", l.OutputPath, err)
 		}
-		defer f.Close()
-		tw := tar.NewWriter(f)
-		defer tw.Close()
-		layerWriters[i] = writerState{file: f, tw: tw}
+		openWriters = append(openWriters, lw)
+		layerWriters[i] = lw
 	}
 
 	// Open fallback tar writer.
-	fallbackFile, err := os.Create(opts.FallbackPath)
+	fallback, err := newWriterState(opts.FallbackPath)
 	if err != nil {
 		return nil, fmt.Errorf("creating fallback output: %w", err)
 	}
-	defer fallbackFile.Close()
-	fallbackTw := tar.NewWriter(fallbackFile)
-	defer fallbackTw.Close()
+	openWriters = append(openWriters, fallback)
 
 	for _, f := range zr.File {
-		tw := resolveWriter(f.Name, opts.Layers, layerWriters, artifactPrefixMap, fallbackTw)
+		tw := resolveWriter(f.Name, opts.Layers, layerWriters, artifactRoutes, fallback.tw)
 		if err := writeEntry(tw, f, opts.PathPrefix); err != nil {
 			return nil, fmt.Errorf("writing entry %s: %w", f.Name, err)
 		}
@@ -148,8 +183,8 @@ func Split(opts SplitOptions) (*SplitResult, error) {
 func resolveWriter(
 	name string,
 	layers []Layer,
-	layerWriters []writerState,
-	artifactPrefixMap map[string]*tar.Writer,
+	layerWriters []*writerState,
+	artifactRoutes []artifactRoute,
 	fallback *tar.Writer,
 ) *tar.Writer {
 	// Check explicit layers first.
@@ -162,11 +197,12 @@ func resolveWriter(
 	// Check artifact-derived prefixes.
 	// Also check if the entry is an ancestor directory of a prefix
 	// (e.g. entry "com/google/" is ancestor of prefix "com/google/common/collect/").
-	if artifactPrefixMap != nil {
-		for prefix, tw := range artifactPrefixMap {
-			if strings.HasPrefix(name, prefix) || strings.HasPrefix(prefix, name) {
-				return tw
+	for _, route := range artifactRoutes {
+		if strings.HasPrefix(name, route.prefix) || strings.HasPrefix(route.prefix, name) {
+			if route.tw == nil {
+				return fallback
 			}
+			return route.tw
 		}
 	}
 
@@ -176,6 +212,116 @@ func resolveWriter(
 type writerState struct {
 	file *os.File
 	tw   *tar.Writer
+}
+
+type artifactRoute struct {
+	prefix     string
+	outputPath string
+	tw         *tar.Writer
+}
+
+func newWriterState(outputPath string) (*writerState, error) {
+	f, err := os.Create(outputPath)
+	if err != nil {
+		return nil, err
+	}
+	return &writerState{file: f, tw: tar.NewWriter(f)}, nil
+}
+
+func (w *writerState) Close() error {
+	tarErr := w.tw.Close()
+	fileErr := w.file.Close()
+	return errors.Join(tarErr, fileErr)
+}
+
+func validateOptions(opts SplitOptions) error {
+	if opts.InputPath == "" {
+		return errors.New("input path is required")
+	}
+	if opts.FallbackPath == "" {
+		return errors.New("fallback output path is required")
+	}
+	if err := validateArchivePath(opts.PathPrefix, true); err != nil {
+		return fmt.Errorf("invalid path prefix: %w", err)
+	}
+	if opts.EntrypointPath != "" && opts.AppPrefix != "" {
+		if !path.IsAbs(opts.AppPrefix) {
+			return errors.New("app prefix must be an absolute container path")
+		}
+		if strings.ContainsAny(opts.AppPrefix, ":\\\x00\r\n\t ") || hasParentPathSegment(opts.AppPrefix) {
+			return errors.New("app prefix contains an invalid character")
+		}
+	}
+
+	outputs := map[string]string{opts.FallbackPath: "fallback output"}
+	for i, layer := range opts.Layers {
+		if layer.Prefix == "" {
+			return fmt.Errorf("layer %d has an empty prefix", i)
+		}
+		if err := validateArchivePath(layer.Prefix, false); err != nil {
+			return fmt.Errorf("invalid layer prefix %q: %w", layer.Prefix, err)
+		}
+		if layer.OutputPath == "" {
+			return fmt.Errorf("layer %q has an empty output path", layer.Prefix)
+		}
+		if owner, ok := outputs[layer.OutputPath]; ok {
+			return fmt.Errorf("output path %q is shared by %s and layer %q", layer.OutputPath, owner, layer.Prefix)
+		}
+		outputs[layer.OutputPath] = fmt.Sprintf("layer %q", layer.Prefix)
+	}
+
+	artifactIDs := make(map[string]string)
+	for i, artifact := range opts.Artifacts {
+		if artifact.ID == "" {
+			return fmt.Errorf("artifact %d has an empty ID", i)
+		}
+		if artifact.OutputPath == "" {
+			return fmt.Errorf("artifact %q has an empty output path", artifact.ID)
+		}
+		if owner, ok := outputs[artifact.OutputPath]; ok {
+			return fmt.Errorf("output path %q is shared by %s and artifact %q", artifact.OutputPath, owner, artifact.ID)
+		}
+		if outputPath, ok := artifactIDs[artifact.ID]; ok && outputPath != artifact.OutputPath {
+			return fmt.Errorf("artifact %q is assigned to multiple outputs (%s and %s)", artifact.ID, outputPath, artifact.OutputPath)
+		}
+		artifactIDs[artifact.ID] = artifact.OutputPath
+	}
+	if len(opts.Artifacts) > 0 && opts.MavenLockFilePath == "" {
+		return errors.New("maven lock file is required when artifact layers are configured")
+	}
+	return nil
+}
+
+func validateArchivePath(name string, allowEmpty bool) error {
+	if name == "" {
+		if allowEmpty {
+			return nil
+		}
+		return errors.New("path must not be empty")
+	}
+	if strings.ContainsRune(name, '\x00') || strings.ContainsAny(name, "\\\r\n") {
+		return errors.New("path contains an invalid character")
+	}
+	if path.IsAbs(name) {
+		return errors.New("path must be relative")
+	}
+	if allowEmpty && !strings.HasSuffix(name, "/") {
+		return errors.New("non-empty prefix must end with a slash")
+	}
+	cleaned := path.Clean(name)
+	if cleaned == ".." || strings.HasPrefix(cleaned, "../") {
+		return errors.New("path must not escape the archive root")
+	}
+	return nil
+}
+
+func hasParentPathSegment(name string) bool {
+	for _, part := range strings.Split(name, "/") {
+		if part == ".." {
+			return true
+		}
+	}
+	return false
 }
 
 func parseLockFile(path string) (*MavenLockFile, error) {
@@ -194,7 +340,7 @@ func parseLockFile(path string) (*MavenLockFile, error) {
 // META-INF/MANIFEST.MF. Returns empty string if no manifest or no Main-Class.
 func parseMainClass(zr *zip.ReadCloser) (string, error) {
 	for _, f := range zr.File {
-		if f.Name == "META-INF/MANIFEST.MF" {
+		if strings.EqualFold(f.Name, "META-INF/MANIFEST.MF") {
 			rc, err := f.Open()
 			if err != nil {
 				return "", fmt.Errorf("opening MANIFEST.MF: %w", err)
@@ -226,8 +372,13 @@ func extractMainClass(manifest string) string {
 		}
 	}
 	for _, line := range lines {
-		if strings.HasPrefix(line, "Main-Class:") {
-			return strings.TrimSpace(strings.TrimPrefix(line, "Main-Class:"))
+		// Only attributes in the main section apply to the JAR itself.
+		if line == "" || line == "\r" {
+			break
+		}
+		name, value, ok := strings.Cut(line, ":")
+		if ok && strings.EqualFold(name, "Main-Class") {
+			return strings.TrimSpace(value)
 		}
 	}
 	return ""
@@ -236,11 +387,24 @@ func extractMainClass(manifest string) string {
 // writeEntrypoint generates a shell script that runs the exploded JAR
 // using java -cp.
 func writeEntrypoint(path, appPrefix, mainClass string) error {
-	script := fmt.Sprintf("#!/bin/sh\nexec java ${JAVA_OPTS} -cp %s %s \"$@\"\n", appPrefix, mainClass)
-	return os.WriteFile(path, []byte(script), 0755)
+	script := fmt.Sprintf("#!/bin/sh\nexec java ${JAVA_OPTS} -cp %s %s \"$@\"\n", shellQuote(appPrefix), shellQuote(mainClass))
+	if err := os.WriteFile(path, []byte(script), 0755); err != nil {
+		return err
+	}
+	return os.Chmod(path, 0755)
+}
+
+func shellQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
 }
 
 func writeEntry(tw *tar.Writer, f *zip.File, pathPrefix string) error {
+	if err := validateArchivePath(f.Name, false); err != nil {
+		return fmt.Errorf("invalid archive path: %w", err)
+	}
+	if f.UncompressedSize64 > math.MaxInt64 {
+		return fmt.Errorf("entry is too large: %d bytes", f.UncompressedSize64)
+	}
 	info := f.FileInfo()
 	isDir := info.IsDir() || strings.HasSuffix(f.Name, "/")
 

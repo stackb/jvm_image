@@ -1,13 +1,16 @@
+// Package jarlayer places intact JVM runtime JARs into OCI-compatible tar layers.
 package jarlayer
 
 import (
 	"archive/tar"
 	"archive/zip"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path"
+	"sort"
 	"strings"
 )
 
@@ -48,7 +51,11 @@ type MavenLockFile struct {
 // For each JAR, the tool inspects its ZIP entries to find a .class file,
 // derives the package name, and matches it against the lock file to determine
 // which artifact (and thus which layer) the JAR belongs to.
-func LayerJars(opts LayerOptions) error {
+func LayerJars(opts LayerOptions) (retErr error) {
+	if err := validateOptions(opts); err != nil {
+		return err
+	}
+
 	// Parse lock file to build package→artifact_id mapping.
 	pkgToArtifact, err := buildPackageMap(opts.LockFilePath)
 	if err != nil {
@@ -58,6 +65,16 @@ func LayerJars(opts LayerOptions) error {
 	// Build artifact_id→tar writer mapping.
 	artifactToWriter := make(map[string]*layerWriter)
 	writersByPath := make(map[string]*layerWriter)
+	var openWriters []*layerWriter
+	defer func() {
+		var closeErr error
+		for i := len(openWriters) - 1; i >= 0; i-- {
+			closeErr = errors.Join(closeErr, openWriters[i].Close())
+		}
+		if closeErr != nil {
+			retErr = errors.Join(retErr, fmt.Errorf("closing output tar: %w", closeErr))
+		}
+	}()
 
 	for _, al := range opts.ArtifactLayers {
 		lw, ok := writersByPath[al.OutputPath]
@@ -66,8 +83,8 @@ func LayerJars(opts LayerOptions) error {
 			if err != nil {
 				return err
 			}
-			defer lw.Close()
 			writersByPath[al.OutputPath] = lw
+			openWriters = append(openWriters, lw)
 		}
 		for _, id := range al.IDs {
 			artifactToWriter[id] = lw
@@ -79,7 +96,7 @@ func LayerJars(opts LayerOptions) error {
 	if err != nil {
 		return fmt.Errorf("creating fallback tar: %w", err)
 	}
-	defer fallback.Close()
+	openWriters = append(openWriters, fallback)
 
 	// Track written directories to avoid duplicates across JARs.
 	writtenDirs := make(map[string]map[string]bool) // writer path -> set of dirs
@@ -105,6 +122,9 @@ func LayerJars(opts LayerOptions) error {
 
 		// Determine a unique tar entry name from the Bazel path.
 		jarName := uniqueJarName(jarPath)
+		if strings.ContainsAny(jarName, "/:\x00\r\n\t ") || jarName == "." || jarName == ".." {
+			return fmt.Errorf("JAR %s produces unsupported classpath name %q", jarPath, jarName)
+		}
 		if usedNames[jarName] {
 			// Collision fallback: append numeric suffix.
 			ext := path.Ext(jarName)
@@ -133,7 +153,7 @@ func LayerJars(opts LayerOptions) error {
 		}
 
 		// Record classpath entry.
-		classpathEntries = append(classpathEntries, opts.AppPrefix+"/"+jarName)
+		classpathEntries = append(classpathEntries, path.Join(opts.AppPrefix, jarName))
 	}
 
 	// Write classpath file.
@@ -163,8 +183,9 @@ func LayerJars(opts LayerOptions) error {
 	return nil
 }
 
-// buildPackageMap parses the lock file and returns a mapping from
-// Java package prefix (e.g., "com/google/common/collect/") to artifact ID.
+// buildPackageMap parses the lock file and returns a mapping from Java package
+// prefix (e.g., "com/google/common/collect/") to artifact ID. Split packages
+// map to the empty string so they cannot cause nondeterministic routing.
 func buildPackageMap(lockFilePath string) (map[string]string, error) {
 	if lockFilePath == "" {
 		return nil, nil
@@ -181,9 +202,24 @@ func buildPackageMap(lockFilePath string) (map[string]string, error) {
 	}
 
 	result := make(map[string]string)
-	for artifactID, packages := range lf.Packages {
+	artifactIDs := make([]string, 0, len(lf.Packages))
+	for artifactID := range lf.Packages {
+		artifactIDs = append(artifactIDs, artifactID)
+	}
+	sort.Strings(artifactIDs)
+	for _, artifactID := range artifactIDs {
+		packages := lf.Packages[artifactID]
 		for _, pkg := range packages {
 			prefix := strings.ReplaceAll(pkg, ".", "/") + "/"
+			if err := validateArchivePrefix(prefix); err != nil {
+				return nil, fmt.Errorf("invalid package %q for artifact %q: %w", pkg, artifactID, err)
+			}
+			if existing, ok := result[prefix]; ok && existing != artifactID {
+				// An empty value marks a split package. It cannot identify a JAR
+				// by itself, but another unique package in the JAR still can.
+				result[prefix] = ""
+				continue
+			}
 			result[prefix] = artifactID
 		}
 	}
@@ -191,8 +227,9 @@ func buildPackageMap(lockFilePath string) (map[string]string, error) {
 	return result, nil
 }
 
-// identifyArtifact opens a JAR and finds the first .class entry to determine
-// which Maven artifact it belongs to via the package→artifact mapping.
+// identifyArtifact opens a JAR and inspects its .class entries to determine
+// which Maven artifact it belongs to via the package→artifact mapping. JARs
+// matching multiple artifacts are left unmatched for fallback routing.
 func identifyArtifact(jarPath string, pkgToArtifact map[string]string) (string, error) {
 	if pkgToArtifact == nil {
 		return "", nil
@@ -204,6 +241,7 @@ func identifyArtifact(jarPath string, pkgToArtifact map[string]string) (string, 
 	}
 	defer zr.Close()
 
+	matches := make(map[string]bool)
 	for _, f := range zr.File {
 		if !strings.HasSuffix(f.Name, ".class") {
 			continue
@@ -219,7 +257,10 @@ func identifyArtifact(jarPath string, pkgToArtifact map[string]string) (string, 
 		// Walk up the package hierarchy to find a match.
 		for pkg != "" {
 			if artifactID, ok := pkgToArtifact[pkg]; ok {
-				return artifactID, nil
+				if artifactID != "" {
+					matches[artifactID] = true
+				}
+				break
 			}
 			// Try parent: "com/google/common/collect/" → "com/google/common/"
 			trimmed := strings.TrimSuffix(pkg, "/")
@@ -230,10 +271,18 @@ func identifyArtifact(jarPath string, pkgToArtifact map[string]string) (string, 
 			pkg = trimmed[:lastSlash+1]
 		}
 
-		// First class entry didn't match; keep trying other entries.
 	}
 
-	return "", nil // no match found
+	if len(matches) == 0 {
+		return "", nil
+	}
+	if len(matches) > 1 {
+		return "", nil
+	}
+	for artifactID := range matches {
+		return artifactID, nil
+	}
+	return "", errors.New("internal error resolving artifact match")
 }
 
 type layerWriter struct {
@@ -255,11 +304,86 @@ func newLayerWriter(outputPath string) (*layerWriter, error) {
 }
 
 func (lw *layerWriter) Close() error {
-	if err := lw.tw.Close(); err != nil {
-		lw.file.Close()
-		return err
+	tarErr := lw.tw.Close()
+	fileErr := lw.file.Close()
+	return errors.Join(tarErr, fileErr)
+}
+
+func validateOptions(opts LayerOptions) error {
+	if opts.FallbackPath == "" {
+		return errors.New("fallback output path is required")
 	}
-	return lw.file.Close()
+	if err := validateArchivePrefix(opts.PathPrefix); err != nil {
+		return fmt.Errorf("invalid path prefix: %w", err)
+	}
+	if opts.AppPrefix == "" || !path.IsAbs(opts.AppPrefix) {
+		return errors.New("app prefix must be an absolute container path")
+	}
+	if strings.ContainsAny(opts.AppPrefix, ":\\\x00\r\n\t ") || hasParentPathSegment(opts.AppPrefix) {
+		return errors.New("app prefix contains a classpath separator or invalid character")
+	}
+
+	outputs := map[string]string{opts.FallbackPath: "fallback output"}
+	if opts.ClasspathPath != "" {
+		outputs[opts.ClasspathPath] = "classpath output"
+		if opts.ClasspathPath == opts.FallbackPath {
+			return fmt.Errorf("output path %q is shared by fallback and classpath outputs", opts.FallbackPath)
+		}
+	}
+	artifactIDs := make(map[string]string)
+	for i, layer := range opts.ArtifactLayers {
+		if layer.OutputPath == "" {
+			return fmt.Errorf("artifact layer %d has an empty output path", i)
+		}
+		if len(layer.IDs) == 0 {
+			return fmt.Errorf("artifact layer %d has no artifact IDs", i)
+		}
+		if owner, ok := outputs[layer.OutputPath]; ok {
+			return fmt.Errorf("output path %q is shared by %s and an artifact layer", layer.OutputPath, owner)
+		}
+		for _, id := range layer.IDs {
+			if id == "" {
+				return fmt.Errorf("artifact layer %d has an empty artifact ID", i)
+			}
+			if outputPath, ok := artifactIDs[id]; ok && outputPath != layer.OutputPath {
+				return fmt.Errorf("artifact %q is assigned to multiple outputs (%s and %s)", id, outputPath, layer.OutputPath)
+			}
+			artifactIDs[id] = layer.OutputPath
+		}
+	}
+	if len(opts.ArtifactLayers) > 0 && opts.LockFilePath == "" {
+		return errors.New("maven lock file is required when artifact layers are configured")
+	}
+	return nil
+}
+
+func validateArchivePrefix(prefix string) error {
+	if prefix == "" {
+		return nil
+	}
+	if strings.ContainsRune(prefix, '\x00') || strings.ContainsAny(prefix, "\\\r\n") {
+		return errors.New("path contains an invalid character")
+	}
+	if path.IsAbs(prefix) {
+		return errors.New("path must be relative")
+	}
+	if !strings.HasSuffix(prefix, "/") {
+		return errors.New("non-empty prefix must end with a slash")
+	}
+	cleaned := path.Clean(prefix)
+	if cleaned == ".." || strings.HasPrefix(cleaned, "../") {
+		return errors.New("path must not escape the archive root")
+	}
+	return nil
+}
+
+func hasParentPathSegment(name string) bool {
+	for _, part := range strings.Split(name, "/") {
+		if part == ".." {
+			return true
+		}
+	}
+	return false
 }
 
 // ensureParentDirs writes directory entries for all path components of prefix

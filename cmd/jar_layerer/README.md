@@ -12,9 +12,9 @@ dropping entries from other JARs. This causes runtime failures when libraries
 like Typesafe Config or Java's `ServiceLoader` expect to scan all JARs on the
 classpath for their resources.
 
-`jar_layerer` avoids the problem entirely by keeping each dependency JAR as an
-individual file in the container. The JVM loads them via a classpath file, giving
-identical behavior to `bazel run` (which already uses individual JARs).
+`jar_layerer` avoids the problem by keeping each dependency JAR as an
+individual file in the container. The JVM loads them via a classpath file, which
+preserves the per-JAR resource layout used by a normal JVM runtime classpath.
 
 ## How it works
 
@@ -46,12 +46,13 @@ java ${JAVA_OPTS} -cp @/app/lib/classpath com.example.Main
 When a Maven lock file is provided, the tool inspects each JAR to determine
 which Maven artifact it belongs to:
 
-1. Open the JAR (ZIP) and find the first `.class` entry.
-2. Derive the Java package from the class path (e.g.
+1. Open the JAR (ZIP) and inspect its `.class` entries.
+2. Derive Java packages from class paths (e.g.
    `com/google/common/collect/Lists.class` → `com.google.common.collect`).
 3. Look up the package in the lock file's `packages` map to find the artifact ID
    (e.g. `com.google.guava:guava`).
-4. Route the JAR to the corresponding artifact layer tar.
+4. Route the JAR when all matches identify one artifact. Ambiguous ownership is
+   sent to the fallback instead of depending on ZIP or map iteration order.
 
 JARs that don't match any artifact go to the fallback tar.
 
@@ -129,5 +130,5 @@ Positional arguments are also accepted as additional JAR paths.
 | Output | Exploded files in tar layers | Intact JARs in tar layers |
 | `reference.conf` | Lost (singlejar last-writer-wins) | Preserved (each JAR has its own) |
 | `META-INF/services` | Lost (singlejar last-writer-wins) | Preserved |
-| Runtime behavior | May differ from `bazel run` | Identical to `bazel run` |
+| Runtime behavior | May differ from a normal multi-JAR classpath | Preserves the multi-JAR resource layout |
 | Entrypoint | `java -cp /app MainClass` | `java -cp @/app/lib/classpath MainClass` |

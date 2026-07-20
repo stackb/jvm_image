@@ -89,7 +89,7 @@ func TestSplit_NoLayers(t *testing.T) {
 	fallbackPath := filepath.Join(dir, "fallback.tar")
 
 	createTestJar(t, jarPath, map[string]string{
-		"META-INF/MANIFEST.MF":  "Manifest-Version: 1.0\n",
+		"META-INF/MANIFEST.MF":   "Manifest-Version: 1.0\n",
 		"com/example/Main.class": "main-class-bytes",
 	})
 
@@ -117,7 +117,7 @@ func TestSplit_WithLayers(t *testing.T) {
 	exampleLayerPath := filepath.Join(dir, "example.tar")
 
 	createTestJar(t, jarPath, map[string]string{
-		"META-INF/MANIFEST.MF":                 "Manifest-Version: 1.0\n",
+		"META-INF/MANIFEST.MF":                  "Manifest-Version: 1.0\n",
 		"com/google/common/collect/Lists.class": "google-class-bytes",
 		"com/google/common/base/Strings.class":  "google-strings-bytes",
 		"com/example/Main.class":                "main-class-bytes",
@@ -245,7 +245,7 @@ func TestSplit_ArtifactLayers(t *testing.T) {
 	// Include directory entries (as JARs typically do) to verify they route
 	// to artifact layers rather than leaking to the fallback.
 	createTestJar(t, jarPath, map[string]string{
-		"META-INF/MANIFEST.MF":                 "Manifest-Version: 1.0\n",
+		"META-INF/MANIFEST.MF":                  "Manifest-Version: 1.0\n",
 		"com/":                                  "",
 		"com/google/":                           "",
 		"com/google/common/":                    "",
@@ -460,7 +460,7 @@ func TestSplit_EntrypointGeneration(t *testing.T) {
 	entrypointPath := filepath.Join(dir, "entrypoint.sh")
 
 	createTestJar(t, jarPath, map[string]string{
-		"META-INF/MANIFEST.MF":  "Manifest-Version: 1.0\nMain-Class: com.example.Main\n",
+		"META-INF/MANIFEST.MF":   "Manifest-Version: 1.0\nMain-Class: com.example.Main\n",
 		"com/example/Main.class": "main-class-bytes",
 	})
 
@@ -484,7 +484,7 @@ func TestSplit_EntrypointGeneration(t *testing.T) {
 		t.Fatal(err)
 	}
 	script := string(data)
-	wantScript := "#!/bin/sh\nexec java ${JAVA_OPTS} -cp /app com.example.Main \"$@\"\n"
+	wantScript := "#!/bin/sh\nexec java ${JAVA_OPTS} -cp '/app' 'com.example.Main' \"$@\"\n"
 	if script != wantScript {
 		t.Errorf("entrypoint script:\ngot:  %q\nwant: %q", script, wantScript)
 	}
@@ -522,13 +522,42 @@ func TestSplit_EntrypointNoManifest(t *testing.T) {
 	}
 }
 
+func TestSplit_EntrypointMakesExistingFileExecutable(t *testing.T) {
+	dir := t.TempDir()
+	jarPath := filepath.Join(dir, "test.jar")
+	entrypointPath := filepath.Join(dir, "entrypoint.sh")
+	createTestJar(t, jarPath, map[string]string{
+		"META-INF/MANIFEST.MF": "Manifest-Version: 1.0\nMain-Class: com.example.Main\n",
+	})
+	if err := os.WriteFile(entrypointPath, []byte("old"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := Split(SplitOptions{
+		InputPath:      jarPath,
+		FallbackPath:   filepath.Join(dir, "fallback.tar"),
+		EntrypointPath: entrypointPath,
+		AppPrefix:      "/app",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(entrypointPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0755 {
+		t.Fatalf("entrypoint mode = %04o, want 0755", info.Mode().Perm())
+	}
+}
+
 func TestSplit_PathPrefix(t *testing.T) {
 	dir := t.TempDir()
 	jarPath := filepath.Join(dir, "test.jar")
 	fallbackPath := filepath.Join(dir, "fallback.tar")
 
 	createTestJar(t, jarPath, map[string]string{
-		"META-INF/MANIFEST.MF":  "Manifest-Version: 1.0\n",
+		"META-INF/MANIFEST.MF":   "Manifest-Version: 1.0\n",
 		"com/example/Main.class": "main-class-bytes",
 	})
 
@@ -557,11 +586,11 @@ func TestSplit_GroupedArtifacts(t *testing.T) {
 	lockFilePath := filepath.Join(dir, "lock.json")
 
 	createTestJar(t, jarPath, map[string]string{
-		"META-INF/MANIFEST.MF":                         "Manifest-Version: 1.0\n",
-		"com/google/common/collect/Lists.class":         "lists-bytes",
+		"META-INF/MANIFEST.MF":                  "Manifest-Version: 1.0\n",
+		"com/google/common/collect/Lists.class": "lists-bytes",
 		"com/google/common/util/concurrent/internal/InternalFutureFailureAccess.class": "fa-bytes",
-		"javax/annotation/Nonnull.class":                "nonnull-bytes",
-		"example/Main.class":                            "main-bytes",
+		"javax/annotation/Nonnull.class":                                               "nonnull-bytes",
+		"example/Main.class":                                                           "main-bytes",
 	})
 
 	createLockFile(t, lockFilePath, map[string][]string{
@@ -651,8 +680,8 @@ func TestSplit_DirectoryPermissions(t *testing.T) {
 	// ZIP directory entries typically have mode bits that include os.ModeDir
 	// but zero permission bits. The splitter must ensure directories get 0755.
 	createTestJar(t, jarPath, map[string]string{
-		"META-INF/":             "",
-		"META-INF/MANIFEST.MF":  "Manifest-Version: 1.0\n",
+		"META-INF/":              "",
+		"META-INF/MANIFEST.MF":   "Manifest-Version: 1.0\n",
 		"com/":                   "",
 		"com/example/":           "",
 		"com/example/Main.class": "main-class-bytes",
@@ -773,4 +802,104 @@ func keys(m map[string]string) []string {
 		result = append(result, k)
 	}
 	return result
+}
+
+func TestExtractMainClass_MainSectionAndCaseInsensitive(t *testing.T) {
+	manifest := "Manifest-Version: 1.0\r\nmain-class: com.example.Main\r\n\r\nName: other\r\nMain-Class: ignored.Entry\r\n"
+	if got := extractMainClass(manifest); got != "com.example.Main" {
+		t.Fatalf("extractMainClass() = %q, want %q", got, "com.example.Main")
+	}
+
+	manifest = "Manifest-Version: 1.0\n\nName: other\nMain-Class: ignored.Entry\n"
+	if got := extractMainClass(manifest); got != "" {
+		t.Fatalf("extractMainClass() = %q, want empty value for entry-section attribute", got)
+	}
+}
+
+func TestSplit_RejectsUnsafeArchivePath(t *testing.T) {
+	dir := t.TempDir()
+	jarPath := filepath.Join(dir, "unsafe.jar")
+	createTestJar(t, jarPath, map[string]string{"../escape.class": "bad"})
+
+	_, err := Split(SplitOptions{
+		InputPath:    jarPath,
+		FallbackPath: filepath.Join(dir, "fallback.tar"),
+	})
+	if err == nil || !strings.Contains(err.Error(), "escape the archive root") {
+		t.Fatalf("Split() error = %v, want unsafe archive path error", err)
+	}
+}
+
+func TestSplit_RejectsConflictingOutputPaths(t *testing.T) {
+	dir := t.TempDir()
+	shared := filepath.Join(dir, "shared.tar")
+	_, err := Split(SplitOptions{
+		InputPath:    filepath.Join(dir, "does-not-matter.jar"),
+		FallbackPath: shared,
+		Layers:       []Layer{{Prefix: "com/", OutputPath: shared}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "shared") {
+		t.Fatalf("Split() error = %v, want shared output error", err)
+	}
+}
+
+func TestSplit_ArtifactLayersRequireLockFile(t *testing.T) {
+	dir := t.TempDir()
+	_, err := Split(SplitOptions{
+		InputPath:    filepath.Join(dir, "does-not-matter.jar"),
+		FallbackPath: filepath.Join(dir, "fallback.tar"),
+		Artifacts: []Artifact{{
+			ID:         "com.example:dep",
+			OutputPath: filepath.Join(dir, "dep.tar"),
+		}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "lock file is required") {
+		t.Fatalf("Split() error = %v, want missing lock file error", err)
+	}
+}
+
+func TestSplit_RejectsUnsafeEntrypointAppPrefix(t *testing.T) {
+	dir := t.TempDir()
+	_, err := Split(SplitOptions{
+		InputPath:      filepath.Join(dir, "does-not-matter.jar"),
+		FallbackPath:   filepath.Join(dir, "fallback.tar"),
+		EntrypointPath: filepath.Join(dir, "entrypoint.sh"),
+		AppPrefix:      "/app/../etc",
+	})
+	if err == nil || !strings.Contains(err.Error(), "app prefix") {
+		t.Fatalf("Split() error = %v, want invalid app prefix error", err)
+	}
+}
+
+func TestSplit_AmbiguousPackageUsesFallback(t *testing.T) {
+	dir := t.TempDir()
+	jarPath := filepath.Join(dir, "test.jar")
+	lockPath := filepath.Join(dir, "lock.json")
+	createTestJar(t, jarPath, map[string]string{"com/example/Main.class": "main"})
+	createLockFile(t, lockPath, map[string][]string{
+		"com.example:first":  {"com.example"},
+		"com.example:second": {"com.example"},
+	})
+
+	firstPath := filepath.Join(dir, "first.tar")
+	secondPath := filepath.Join(dir, "second.tar")
+	fallbackPath := filepath.Join(dir, "fallback.tar")
+	_, err := Split(SplitOptions{
+		InputPath:         jarPath,
+		FallbackPath:      fallbackPath,
+		MavenLockFilePath: lockPath,
+		Artifacts: []Artifact{
+			{ID: "com.example:first", OutputPath: firstPath},
+			{ID: "com.example:second", OutputPath: secondPath},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := readTar(t, fallbackPath)["com/example/Main.class"]; !ok {
+		t.Fatal("ambiguous package entry was not written to fallback")
+	}
+	if len(readTar(t, firstPath)) != 0 || len(readTar(t, secondPath)) != 0 {
+		t.Fatal("ambiguous package entry was written to an artifact layer")
+	}
 }
