@@ -65,6 +65,39 @@ def _runtime_jars(binary):
         return binary[java_common.JavaRuntimeClasspathInfo].runtime_classpath.to_list()
     return binary[JavaInfo].transitive_runtime_jars.to_list()
 
+def _runfiles_archive_path(file, workspace_name):
+    """Return a Bazel-compatible runfiles path rooted below app/."""
+    short_path = file.short_path
+    if short_path.startswith("../"):
+        relative_path = short_path[3:]
+    elif short_path.startswith("external/"):
+        relative_path = short_path[len("external/"):]
+    else:
+        relative_path = workspace_name + "/" + short_path
+    if not relative_path or ".." in relative_path.split("/"):
+        fail("data file %s has unsafe runfiles path %r" % (file.path, relative_path))
+    return "app/" + relative_path
+
+def _data_files(ctx, runtime_jars):
+    """Collect non-JDK, non-classpath runfiles from the binary and data attr."""
+    binary_info = ctx.attr.binary[DefaultInfo]
+    transitive = [binary_info.data_runfiles.files]
+    for target in ctx.attr.data:
+        info = target[DefaultInfo]
+        transitive.append(info.files)
+        transitive.append(info.default_runfiles.files)
+        transitive.append(info.data_runfiles.files)
+
+    excluded = {
+        file.path: True
+        for file in runtime_jars + binary_info.files.to_list() + ctx.files._jdk
+    }
+    return [
+        file
+        for file in depset(transitive = transitive).to_list()
+        if file.path not in excluded
+    ]
+
 def _group_key(artifact_id, depth):
     """Extract a grouping key from an artifact ID at the given depth.
 
@@ -124,6 +157,7 @@ def _group_artifacts(artifact_ids, max_groups):
 def jvm_jar_layers(
         name,
         binary,
+        data = [],
         maven_lock_file = None,
         max_layers = 121,
         layer_strategy = "group_by_prefix",
@@ -141,6 +175,9 @@ def jvm_jar_layers(
     Args:
         name: target name
         binary: label of a java_binary or scala_binary target
+        data: optional files or targets whose files and runfiles are added under
+            /app using Bazel's runfiles layout. The binary's own non-JAR data
+            runfiles are included automatically.
         maven_lock_file: optional label of a rules_jvm_external lock file JSON
             for Maven artifact-based layer grouping. When omitted, all runtime
             JARs are written to the fallback tar.
@@ -155,6 +192,7 @@ def jvm_jar_layers(
     _jvm_jar_layers(
         name = name,
         binary = binary,
+        data = data,
         maven_lock_file = maven_lock_file,
         max_layers = max_layers,
         layer_strategy = layer_strategy,
@@ -181,6 +219,33 @@ def _jvm_jar_layers_impl(ctx):
     args.add("--jar_list", jar_list)
     args.add("--app_prefix", ctx.attr.app_prefix)
     args.add("--path_prefix", ctx.attr.path_prefix)
+
+    data_files = _data_files(ctx, runtime_jars)
+    if data_files:
+        data_by_destination = {}
+        for file in data_files:
+            destination = _runfiles_archive_path(file, ctx.workspace_name)
+            previous = data_by_destination.get(destination)
+            if previous and previous.path != file.path:
+                fail("data files %s and %s collide at /%s" % (previous.path, file.path, destination))
+            data_by_destination[destination] = file
+
+        data_manifest = ctx.actions.declare_file(ctx.label.name + "_data.json")
+        manifest_entries = [
+            {
+                "destination": destination,
+                "source": data_by_destination[destination].path,
+            }
+            for destination in sorted(data_by_destination.keys())
+        ]
+        ctx.actions.write(data_manifest, json.encode(manifest_entries))
+        inputs.extend(data_by_destination.values())
+        inputs.append(data_manifest)
+        args.add("--data_manifest", data_manifest)
+
+        data_layer = ctx.actions.declare_file(ctx.label.name + ".data.tar")
+        args.add("--data_layer", data_layer)
+        tar_outputs.append(data_layer)
 
     # Classpath file (not a tar — kept separate from tar outputs).
     classpath_file = ctx.actions.declare_file(ctx.label.name + "_classpath")
@@ -250,6 +315,10 @@ _jvm_jar_layers = rule(
             aspects = [_maven_artifacts_aspect],
             doc = "The java_binary or scala_binary target.",
         ),
+        "data": attr.label_list(
+            allow_files = True,
+            doc = "Additional files and runfiles to place under /app using Bazel's runfiles layout.",
+        ),
         "maven_lock_file": attr.label(
             allow_single_file = [".json"],
             doc = "Maven lock file JSON for artifact-based layer grouping.",
@@ -276,6 +345,10 @@ _jvm_jar_layers = rule(
             executable = True,
             cfg = "exec",
             doc = "The jar_layerer Go binary.",
+        ),
+        "_jdk": attr.label(
+            default = "@bazel_tools//tools/jdk:current_java_runtime",
+            providers = [java_common.JavaRuntimeInfo],
         ),
     },
 )

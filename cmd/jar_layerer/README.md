@@ -108,6 +108,8 @@ The rule:
 - Uses `_maven_artifacts_aspect` and `_MavenArtifactsInfo` to collect Maven
   artifact IDs from `maven_coordinates=` tags.
 - Writes a jar list file and passes it to `jar_layerer`.
+- Writes non-JAR binary runfiles and explicit `data` targets to a separate
+  runfiles layer rooted at `app/`, excluding the host JDK and binary launcher.
 - Declares per-artifact (or per-group) output tars.
 - Outputs all tars via `DefaultInfo` and the classpath file via `OutputGroupInfo`.
 
@@ -123,5 +125,7 @@ The rule:
 | `--path_prefix` | Prefix prepended to tar entry paths (default `app/lib/`) |
 | `--artifact_layer` | `ARTIFACT_ID=path.tar` — one artifact per layer (repeatable) |
 | `--artifact_group_layer` | `ID1,ID2,...=path.tar` — multiple artifacts sharing a layer (repeatable) |
+| `--data_manifest` | JSON list mapping data source paths to runfiles destinations |
+| `--data_layer` | Output tar for files from `--data_manifest` |
 
 Positional arguments are also accepted as additional JAR paths.

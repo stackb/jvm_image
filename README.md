@@ -42,6 +42,7 @@ load("@jvm_image//:jvm_jar_layers.bzl", "jvm_jar_layers")
 jvm_jar_layers(
     name = "server_layers",
     binary = ":server",
+    data = ["@fincad//:libraries"],
 )
 ```
 
@@ -67,16 +68,28 @@ entrypoint = [
     "@/app/lib/classpath",
     "com.example.Server",
 ]
+env = {"JAVA_RUNFILES": "/app"}
 ```
 
 The generated `classpath` file is included in the fallback tar. It is also
 available through the target's `classpath` output group. The `binary` must
 provide a non-empty JVM runtime classpath; analysis fails otherwise.
 
+Non-JAR files in the binary's `data` runfiles are included automatically.
+Additional `data` targets are collected explicitly and written to a dedicated
+runfiles layer under `/app`. Workspace files use
+`/app/<workspace>/<package>/<file>`; external files use
+`/app/<canonical-repository>/<package>/<file>`. Set `JAVA_RUNFILES=/app` when
+the application uses Bazel's runfiles lookup conventions. Host JDK files,
+binary launchers, and runtime JARs are excluded from this data layer.
+
 ## Configuration notes
 
 - `maven_lock_file` is optional. When omitted, every runtime JAR goes to the
   fallback tar.
+- `data` is optional. It accepts files and targets and includes their transitive
+  runfiles without adding them to the JVM classpath. Destination collisions
+  fail the build instead of silently overwriting a file.
 - `max_layers` limits Maven-derived tar layers. It excludes the fallback tar
   and has no effect without `maven_lock_file`. Set it to `0` to disable
   Maven-derived layers.
