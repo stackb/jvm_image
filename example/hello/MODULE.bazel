@@ -10,7 +10,8 @@ module(
 bazel_dep(name = "rules_img", version = "0.3.4")
 bazel_dep(name = "rules_java", version = "9.6.1")
 bazel_dep(name = "rules_jvm_external", version = "6.7")
-bazel_dep(name = "jvm_image", version = "0.1.0")
+
+bazel_dep(name = "jvm_image", version = "0.0.0", dev_dependency = True)
 local_path_override(
     module_name = "jvm_image",
     path = "../..",

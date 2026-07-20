@@ -104,3 +104,10 @@ bazel build //:image
 
 The example in [`example/hello`](example/hello) demonstrates `jvm_jar_layers`
 with `rules_img`.
+
+## Releasing
+
+Before onboarding a client, pin a green commit, choose and add a repository
+license, and publish a matching `v0.1.x` tag. A license is intentionally not
+inferred by this repository. See [`RELEASING.md`](RELEASING.md) for the GitHub
+release and Bazel Central Registry process.
