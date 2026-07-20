@@ -555,3 +555,70 @@ func TestLayerJars_RejectsUnsafeAppPrefix(t *testing.T) {
 		t.Fatalf("LayerJars() error = %v, want invalid app prefix error", err)
 	}
 }
+
+func TestLayerData_WritesFilesAndDirectories(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.txt")
+	if err := os.WriteFile(configPath, []byte("config"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	nativeDir := filepath.Join(dir, "native")
+	if err := os.MkdirAll(filepath.Join(nativeDir, "lib"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(nativeDir, "lib", "libexample.so"), []byte("native"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	outputPath := filepath.Join(dir, "data.tar")
+	if err := LayerData(outputPath, []DataFile{
+		{Source: nativeDir, Destination: "app/fincad/libraries"},
+		{Source: configPath, Destination: "app/service/config.txt"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	entries := readTar(t, outputPath)
+	if got := entries["app/service/config.txt"]; got != "config" {
+		t.Fatalf("config contents = %q, want config", got)
+	}
+	if got := entries["app/fincad/libraries/lib/libexample.so"]; got != "native" {
+		t.Fatalf("native library contents = %q, want native", got)
+	}
+}
+
+func TestLayerData_RejectsCollisions(t *testing.T) {
+	dir := t.TempDir()
+	first := filepath.Join(dir, "first")
+	second := filepath.Join(dir, "second")
+	if err := os.WriteFile(first, []byte("first"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(second, []byte("second"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	err := LayerData(filepath.Join(dir, "data.tar"), []DataFile{
+		{Source: first, Destination: "app/service/data"},
+		{Source: second, Destination: "app/service/data"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "collide") {
+		t.Fatalf("LayerData() error = %v, want collision error", err)
+	}
+}
+
+func TestLayerData_RejectsUnsafeDestination(t *testing.T) {
+	dir := t.TempDir()
+	input := filepath.Join(dir, "input")
+	if err := os.WriteFile(input, []byte("data"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	err := LayerData(filepath.Join(dir, "data.tar"), []DataFile{{
+		Source:      input,
+		Destination: "../etc/passwd",
+	}})
+	if err == nil || !strings.Contains(err.Error(), "invalid data destination") {
+		t.Fatalf("LayerData() error = %v, want unsafe destination error", err)
+	}
+}

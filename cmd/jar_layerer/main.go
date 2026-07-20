@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
@@ -24,6 +25,8 @@ func main() {
 	appPrefix := flag.String("app_prefix", "/app/lib", "classpath prefix in the container")
 	pathPrefix := flag.String("path_prefix", "app/lib/", "prefix prepended to tar entry paths")
 	jarList := flag.String("jar_list", "", "path to file listing JAR paths, one per line")
+	dataManifest := flag.String("data_manifest", "", "path to a JSON data-file manifest")
+	dataLayer := flag.String("data_layer", "", "path to the data runfiles output tar")
 
 	var artifactLayers repeatedFlag
 	flag.Var(&artifactLayers, "artifact_layer", "ARTIFACT_ID=path.tar (repeatable)")
@@ -99,5 +102,26 @@ func main() {
 	if err := jarlayer.LayerJars(opts); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
+	}
+
+	if (*dataManifest == "") != (*dataLayer == "") {
+		fmt.Fprintln(os.Stderr, "--data_manifest and --data_layer must be set together")
+		os.Exit(1)
+	}
+	if *dataManifest != "" {
+		data, err := os.ReadFile(*dataManifest)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "reading data manifest: %v\n", err)
+			os.Exit(1)
+		}
+		var files []jarlayer.DataFile
+		if err := json.Unmarshal(data, &files); err != nil {
+			fmt.Fprintf(os.Stderr, "parsing data manifest: %v\n", err)
+			os.Exit(1)
+		}
+		if err := jarlayer.LayerData(*dataLayer, files); err != nil {
+			fmt.Fprintf(os.Stderr, "layering data: %v\n", err)
+			os.Exit(1)
+		}
 	}
 }

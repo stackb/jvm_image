@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"path"
+	"path/filepath"
 	"sort"
 	"strings"
 )
@@ -37,6 +38,12 @@ type LayerOptions struct {
 type ArtifactLayer struct {
 	IDs        []string
 	OutputPath string
+}
+
+// DataFile maps an input file or directory to a path in a data layer tar.
+type DataFile struct {
+	Source      string `json:"source"`
+	Destination string `json:"destination"`
 }
 
 // MavenLockFile represents the relevant parts of the maven lock file JSON.
@@ -180,6 +187,131 @@ func LayerJars(opts LayerOptions) (retErr error) {
 		}
 	}
 
+	return nil
+}
+
+// LayerData writes files into a deterministic tar using their Bazel runfiles
+// paths. Directories are expanded recursively and symlinks are rejected.
+func LayerData(outputPath string, files []DataFile) (retErr error) {
+	if outputPath == "" {
+		return errors.New("data layer output path is required")
+	}
+
+	lw, err := newLayerWriter(outputPath)
+	if err != nil {
+		return fmt.Errorf("creating data layer: %w", err)
+	}
+	defer func() {
+		if closeErr := lw.Close(); closeErr != nil {
+			retErr = errors.Join(retErr, fmt.Errorf("closing data layer: %w", closeErr))
+		}
+	}()
+
+	orderedFiles := append([]DataFile(nil), files...)
+	sort.Slice(orderedFiles, func(i, j int) bool {
+		if orderedFiles[i].Destination == orderedFiles[j].Destination {
+			return orderedFiles[i].Source < orderedFiles[j].Source
+		}
+		return orderedFiles[i].Destination < orderedFiles[j].Destination
+	})
+	written := make(map[string]string)
+	for _, file := range orderedFiles {
+		if err := writeDataPath(lw.tw, file.Source, file.Destination, written); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func writeDataPath(tw *tar.Writer, source, destination string, written map[string]string) error {
+	if source == "" {
+		return errors.New("data source path is empty")
+	}
+	if err := validateArchivePath(destination); err != nil {
+		return fmt.Errorf("invalid data destination %q: %w", destination, err)
+	}
+
+	linkInfo, err := os.Lstat(source)
+	if err != nil {
+		return fmt.Errorf("stating data source %s: %w", source, err)
+	}
+	info, err := os.Stat(source)
+	if err != nil {
+		return fmt.Errorf("resolving data source %s: %w", source, err)
+	}
+	if info.IsDir() {
+		walkRoot := source
+		if linkInfo.Mode()&os.ModeSymlink != 0 {
+			walkRoot, err = filepath.EvalSymlinks(source)
+			if err != nil {
+				return fmt.Errorf("resolving data directory %s: %w", source, err)
+			}
+		}
+		return filepath.WalkDir(walkRoot, func(child string, entry os.DirEntry, walkErr error) error {
+			if walkErr != nil {
+				return walkErr
+			}
+			if child == walkRoot {
+				return nil
+			}
+			if entry.Type()&os.ModeSymlink != 0 {
+				return fmt.Errorf("data directory %s contains symlink %s", source, child)
+			}
+			if entry.IsDir() {
+				return nil
+			}
+			relative, err := filepath.Rel(walkRoot, child)
+			if err != nil {
+				return err
+			}
+			return writeDataPath(tw, child, path.Join(destination, filepath.ToSlash(relative)), written)
+		})
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("data source %s is not a regular file or directory", source)
+	}
+	if previous, ok := written[destination]; ok {
+		if previous == source {
+			return nil
+		}
+		return fmt.Errorf("data sources %s and %s collide at %s", previous, source, destination)
+	}
+	written[destination] = source
+
+	f, err := os.Open(source)
+	if err != nil {
+		return fmt.Errorf("opening data source %s: %w", source, err)
+	}
+	defer f.Close()
+
+	mode := int64(0644)
+	if info.Mode().Perm()&0111 != 0 {
+		mode = 0755
+	}
+	if err := tw.WriteHeader(&tar.Header{
+		Typeflag: tar.TypeReg,
+		Name:     destination,
+		Size:     info.Size(),
+		Mode:     mode,
+	}); err != nil {
+		return fmt.Errorf("writing data header %s: %w", destination, err)
+	}
+	if _, err := io.Copy(tw, f); err != nil {
+		return fmt.Errorf("writing data file %s: %w", destination, err)
+	}
+	return nil
+}
+
+func validateArchivePath(name string) error {
+	if name == "" || path.IsAbs(name) {
+		return errors.New("path must be non-empty and relative")
+	}
+	if strings.ContainsRune(name, '\x00') || strings.ContainsAny(name, "\\\r\n") {
+		return errors.New("path contains an invalid character")
+	}
+	if name != path.Clean(name) || hasParentPathSegment(name) {
+		return errors.New("path must be clean and must not escape the archive root")
+	}
 	return nil
 }
 

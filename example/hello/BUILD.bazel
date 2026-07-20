@@ -6,6 +6,7 @@ load("@rules_java//java:java_binary.bzl", "java_binary")
 java_binary(
     name = "hello",
     srcs = ["Main.java"],
+    data = ["greeting.txt"],
     main_class = "example.hello.Main",
     deps = ["@maven2//:com_google_guava_guava"],
 )
@@ -13,6 +14,7 @@ java_binary(
 jvm_jar_layers(
     name = "layers",
     binary = ":hello",
+    data = ["runtime/native.marker"],
     maven_lock_file = "maven2_install.json",
 )
 
@@ -25,6 +27,7 @@ image_manifest(
         "@/app/lib/classpath",
         "example.hello.Main",
     ],
+    env = {"JAVA_RUNFILES": "/app"},
     layers = [":layers"],
     platform = "@rules_img//img/private/platforms:linux_amd64",
     stamp = "auto",
