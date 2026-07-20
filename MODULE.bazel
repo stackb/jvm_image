@@ -1,7 +1,8 @@
+"""Module definition and development toolchain configuration for jvm_image."""
+
 module(
     name = "jvm_image",
     version = "0.1.0",
-    compatibility_level = 1,
 )
 
 bazel_dep(name = "bazel_skylib", version = "1.9.0")

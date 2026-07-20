@@ -88,10 +88,10 @@ from the full Bazel output path:
 
 ## Starlark integration
 
-The `jvm_jar_layers` rule in `jvm_image_layers.bzl` drives this tool:
+The `jvm_jar_layers` rule in `jvm_jar_layers.bzl` drives this tool:
 
 ```starlark
-load("@jvm_image//:jvm_image_layers.bzl", "jvm_jar_layers")
+load("@jvm_image//:jvm_jar_layers.bzl", "jvm_jar_layers")
 
 jvm_jar_layers(
     name = "my_layers",
@@ -121,14 +121,3 @@ The rule:
 | `--artifact_group_layer` | `ID1,ID2,...=path.tar` — multiple artifacts sharing a layer (repeatable) |
 
 Positional arguments are also accepted as additional JAR paths.
-
-## Comparison with executable_jar_splitter
-
-| | `executable_jar_splitter` | `jar_layerer` |
-|---|---|---|
-| Input | Single deploy JAR (merged) | Individual dependency JARs |
-| Output | Exploded files in tar layers | Intact JARs in tar layers |
-| `reference.conf` | Lost (singlejar last-writer-wins) | Preserved (each JAR has its own) |
-| `META-INF/services` | Lost (singlejar last-writer-wins) | Preserved |
-| Runtime behavior | May differ from a normal multi-JAR classpath | Preserves the multi-JAR resource layout |
-| Entrypoint | `java -cp /app MainClass` | `java -cp @/app/lib/classpath MainClass` |

@@ -2,21 +2,16 @@
 
 [![CI](https://github.com/stackb/jvm_image/actions/workflows/ci.yml/badge.svg)](https://github.com/stackb/jvm_image/actions/workflows/ci.yml)
 
-`jvm_image` provides Bazel rules that turn a `java_binary` or `scala_binary`
+`jvm_image` provides a Bazel rule that turns a `java_binary` or `scala_binary`
 runtime into OCI-compatible tar layers. It is intended to be consumed by image
 rules such as [`rules_img`](https://github.com/bazel-contrib/rules_img).
 
 The public API is pre-1.0. Pin clients to a release tag or commit and review
 upgrades before changing the pin.
 
-## Choose a rule
-
-| Rule               | Layout                                          | Use when                                                                               |
-|--------------------|-------------------------------------------------|----------------------------------------------------------------------------------------|
-| `jvm_jar_layers`   | Keeps every runtime JAR intact under `/app/lib` | Recommended. Preserves duplicate resources and matches the normal JVM classpath model. |
-| `jvm_image_layers` | Explodes one deploy JAR under `/app`            | Use only when the deploy JAR's merged-resource behavior is acceptable.                 |
-
-Both rules always produce a fallback tar for unmatched content. With a
+`jvm_jar_layers` keeps every runtime JAR intact under `/app/lib`, preserving
+duplicate resources and the normal JVM classpath model. It always produces a
+fallback tar for unmatched content. With a
 `rules_jvm_external` lock file, Maven dependencies can be placed in separate or
 grouped layers so application-only changes reuse dependency layers.
 
@@ -37,10 +32,10 @@ git_override(
 
 Do not point production clients at a moving branch.
 
-## Recommended usage: intact JARs
+## Usage
 
 ```starlark
-load("@jvm_image//:jvm_image_layers.bzl", "jvm_jar_layers")
+load("@jvm_image//:jvm_jar_layers.bzl", "jvm_jar_layers")
 
 jvm_jar_layers(
     name = "server_layers",
@@ -65,28 +60,10 @@ entrypoint = [
 The generated `classpath` file is included in the fallback tar. It is also
 available through the target's `classpath` output group.
 
-## Deploy-JAR usage
-
-```starlark
-load("@jvm_image//:jvm_image_layers.bzl", "jvm_image_layers")
-
-jvm_image_layers(
-    name = "server_layers",
-    binary = ":server",
-    layers = ["com/example/"],
-    maven_lock_file = "//:maven_install.json",
-    max_layers = 32,
-)
-```
-
-This rule reads `Main-Class` from `META-INF/MANIFEST.MF` and exposes a generated
-launcher through the `entrypoint` output group. The exploded classes are rooted
-at `/app` by default.
-
 ## Configuration notes
 
-- `max_layers` limits Maven-derived tar layers. It excludes explicit prefix
-  layers and the fallback tar. Set it to `0` to disable Maven-derived layers.
+- `max_layers` limits Maven-derived tar layers. It excludes the fallback tar.
+  Set it to `0` to disable Maven-derived layers.
 - `layer_strategy = "group_by_prefix"` groups Maven coordinates when their
   count exceeds `max_layers`; `"truncate"` sends the excess to the fallback.
 - `path_prefix` is a relative archive prefix and must end in `/` when non-empty.
@@ -109,8 +86,8 @@ cd example/hello
 bazel build //:image
 ```
 
-The example in [`example/hello`](example/hello) demonstrates the exploded
-deploy-JAR rule with `rules_img`.
+The example in [`example/hello`](example/hello) demonstrates `jvm_jar_layers`
+with `rules_img`.
 
 ## Release checklist
 
