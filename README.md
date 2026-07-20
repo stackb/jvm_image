@@ -10,10 +10,12 @@ The public API is pre-1.0. Pin clients to a release tag or commit and review
 upgrades before changing the pin.
 
 `jvm_jar_layers` keeps every runtime JAR intact under `/app/lib`, preserving
-duplicate resources and the normal JVM classpath model. It always produces a
-fallback tar for unmatched content. With a
-`rules_jvm_external` lock file, Maven dependencies can be placed in separate or
-grouped layers so application-only changes reuse dependency layers.
+duplicate resources and the normal JVM classpath model. Maven is not required:
+without Maven metadata, the rule places the runtime classpath and its classpath
+file in one fallback tar. With a `rules_jvm_external` lock file, Maven
+dependencies can instead be placed in separate or grouped layers so
+application-only changes retain the same dependency-layer digests for
+registry- and fleet-wide cache reuse.
 
 ## Install
 
@@ -40,6 +42,16 @@ load("@jvm_image//:jvm_jar_layers.bzl", "jvm_jar_layers")
 jvm_jar_layers(
     name = "server_layers",
     binary = ":server",
+)
+```
+
+To partition recognized Maven dependencies into stable cacheable layers, pass
+the lock file produced by a `rules_jvm_external` `maven.install` repository:
+
+```starlark
+jvm_jar_layers(
+    name = "server_layers",
+    binary = ":server",
     maven_lock_file = "//:maven_install.json",
     max_layers = 32,
 )
@@ -58,12 +70,16 @@ entrypoint = [
 ```
 
 The generated `classpath` file is included in the fallback tar. It is also
-available through the target's `classpath` output group.
+available through the target's `classpath` output group. The `binary` must
+provide a non-empty JVM runtime classpath; analysis fails otherwise.
 
 ## Configuration notes
 
-- `max_layers` limits Maven-derived tar layers. It excludes the fallback tar.
-  Set it to `0` to disable Maven-derived layers.
+- `maven_lock_file` is optional. When omitted, every runtime JAR goes to the
+  fallback tar.
+- `max_layers` limits Maven-derived tar layers. It excludes the fallback tar
+  and has no effect without `maven_lock_file`. Set it to `0` to disable
+  Maven-derived layers.
 - `layer_strategy = "group_by_prefix"` groups Maven coordinates when their
   count exceeds `max_layers`; `"truncate"` sends the excess to the fallback.
 - `path_prefix` is a relative archive prefix and must end in `/` when non-empty.
@@ -88,9 +104,3 @@ bazel build //:image
 
 The example in [`example/hello`](example/hello) demonstrates `jvm_jar_layers`
 with `rules_img`.
-
-## Release checklist
-
-Before onboarding a client, pin a green commit, choose and add a repository
-license, and publish a matching `v0.1.x` tag. A license and hosted release are
-intentionally not inferred by this repository.

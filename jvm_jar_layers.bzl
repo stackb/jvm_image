@@ -3,14 +3,14 @@
 load("@rules_java//java/common:java_common.bzl", "java_common")
 load("@rules_java//java/common:java_info.bzl", "JavaInfo")
 
-MavenDepsInfo = provider(
-    doc = "Collects maven artifact IDs from jvm_import dependencies.",
+_MavenArtifactsInfo = provider(
+    doc = "Collects Maven artifact IDs from jvm_import dependencies.",
     fields = {
         "artifacts": "depset of artifact ID strings (group:name)",
     },
 )
 
-def _maven_deps_aspect_impl(_target, ctx):
+def _maven_artifacts_aspect_impl(_target, ctx):
     artifacts = []
 
     # Check tags for maven_coordinates.
@@ -28,15 +28,15 @@ def _maven_deps_aspect_impl(_target, ctx):
     for attr_name in ("deps", "exports", "runtime_deps"):
         if hasattr(ctx.rule.attr, attr_name):
             for dep in getattr(ctx.rule.attr, attr_name):
-                if MavenDepsInfo in dep:
-                    transitive.append(dep[MavenDepsInfo].artifacts)
+                if _MavenArtifactsInfo in dep:
+                    transitive.append(dep[_MavenArtifactsInfo].artifacts)
 
-    return [MavenDepsInfo(
+    return [_MavenArtifactsInfo(
         artifacts = depset(direct = artifacts, transitive = transitive),
     )]
 
-_maven_deps_aspect = aspect(
-    implementation = _maven_deps_aspect_impl,
+_maven_artifacts_aspect = aspect(
+    implementation = _maven_artifacts_aspect_impl,
     attr_aspects = ["deps", "exports", "runtime_deps"],
 )
 
@@ -141,8 +141,9 @@ def jvm_jar_layers(
     Args:
         name: target name
         binary: label of a java_binary or scala_binary target
-        maven_lock_file: optional label of a maven lock file JSON for
-            artifact-based layer grouping.
+        maven_lock_file: optional label of a rules_jvm_external lock file JSON
+            for Maven artifact-based layer grouping. When omitted, all runtime
+            JARs are written to the fallback tar.
         max_layers: maximum number of artifact layers (default 121).
         layer_strategy: strategy when artifacts exceed max_layers.
         app_prefix: classpath prefix inside the container (default "/app/lib").
@@ -196,7 +197,7 @@ def _jvm_jar_layers_impl(ctx):
         inputs.append(lock_file)
         args.add("--maven_lock_file", lock_file)
 
-        artifact_ids = sorted(ctx.attr.binary[MavenDepsInfo].artifacts.to_list())
+        artifact_ids = sorted(ctx.attr.binary[_MavenArtifactsInfo].artifacts.to_list())
         available_slots = ctx.attr.max_layers
         strategy = ctx.attr.layer_strategy
 
@@ -246,7 +247,7 @@ _jvm_jar_layers = rule(
     attrs = {
         "binary": attr.label(
             mandatory = True,
-            aspects = [_maven_deps_aspect],
+            aspects = [_maven_artifacts_aspect],
             doc = "The java_binary or scala_binary target.",
         ),
         "maven_lock_file": attr.label(

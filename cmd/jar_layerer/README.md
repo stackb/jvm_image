@@ -1,6 +1,6 @@
 # jar_layerer
 
-Distributes individual JVM dependency JARs across OCI container layer tarballs
+Distributes individual JVM runtime JARs across OCI container layer tarballs
 for efficient caching, while preserving each JAR intact.
 
 ## Why this exists
@@ -20,7 +20,7 @@ preserves the per-JAR resource layout used by a normal JVM runtime classpath.
 
 ```
 scala_binary
-  └─ JavaInfo.transitive_runtime_jars  (individual JARs from Bazel)
+  └─ JVM runtime classpath  (individual JARs from Bazel)
        │
        ▼
   jar_layerer
@@ -31,9 +31,9 @@ scala_binary
        └─ fallback.tar       ← unmatched JARs + classpath file
 ```
 
-Each output tar contains intact `.jar` files under a configurable path prefix
-(default `app/lib/`). A classpath file is written both to disk (for Bazel) and
-into the fallback tar (so it's present in the container at runtime).
+JAR entries are stored intact under a configurable path prefix (default
+`app/lib/`). A classpath file is written both to disk (for Bazel) and into the
+fallback tar (so it's present in the container at runtime).
 
 The container entrypoint uses Java's `@file` syntax to read the classpath:
 
@@ -43,8 +43,9 @@ java ${JAVA_OPTS} -cp @/app/lib/classpath com.example.Main
 
 ## Artifact routing
 
-When a Maven lock file is provided, the tool inspects each JAR to determine
-which Maven artifact it belongs to:
+Maven integration is optional. When a `rules_jvm_external` lock file is
+provided, the tool inspects each JAR to determine which Maven artifact it
+belongs to:
 
 1. Open the JAR (ZIP) and inspect its `.class` entries.
 2. Derive Java packages from class paths (e.g.
@@ -101,8 +102,11 @@ jvm_jar_layers(
 ```
 
 The rule:
-- Collects `transitive_runtime_jars` from the binary's `JavaInfo` provider.
-- Uses `_maven_deps_aspect` to collect Maven artifact IDs from `maven_coordinates=` tags.
+
+- Collects the binary's runtime classpath from `JavaRuntimeClasspathInfo`, with
+  `JavaInfo.transitive_runtime_jars` as a compatibility fallback.
+- Uses `_maven_artifacts_aspect` and `_MavenArtifactsInfo` to collect Maven
+  artifact IDs from `maven_coordinates=` tags.
 - Writes a jar list file and passes it to `jar_layerer`.
 - Declares per-artifact (or per-group) output tars.
 - Outputs all tars via `DefaultInfo` and the classpath file via `OutputGroupInfo`.
