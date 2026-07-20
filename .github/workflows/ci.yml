@@ -45,6 +45,7 @@ jobs:
           cache-save: ${{ github.event_name != 'pull_request' }}
           disk-cache: ${{ github.workflow }}
           repository-cache: |
+            - go.mod
             - MODULE.bazel
             - MODULE.bazel.lock
             - example/hello/MODULE.bazel
@@ -60,7 +61,7 @@ jobs:
           echo "$tool_bin" >> "$GITHUB_PATH"
 
       - name: Install pinned Staticcheck
-        run: go install honnef.co/go/tools/cmd/staticcheck@v0.5.1
+        run: go install honnef.co/go/tools/cmd/staticcheck@v0.7.0
 
       - name: Test Go packages
         run: go test ./... -count=1

@@ -1,5 +1,7 @@
 # jvm_image
 
+[![CI](https://github.com/stackb/jvm_image/actions/workflows/ci.yml/badge.svg)](https://github.com/stackb/jvm_image/actions/workflows/ci.yml)
+
 `jvm_image` provides Bazel rules that turn a `java_binary` or `scala_binary`
 runtime into OCI-compatible tar layers. It is intended to be consumed by image
 rules such as [`rules_img`](https://github.com/bazel-contrib/rules_img).
@@ -9,10 +11,10 @@ upgrades before changing the pin.
 
 ## Choose a rule
 
-| Rule | Layout | Use when |
-| --- | --- | --- |
-| `jvm_jar_layers` | Keeps every runtime JAR intact under `/app/lib` | Recommended. Preserves duplicate resources and matches the normal JVM classpath model. |
-| `jvm_image_layers` | Explodes one deploy JAR under `/app` | Use only when the deploy JAR's merged-resource behavior is acceptable. |
+| Rule               | Layout                                          | Use when                                                                               |
+|--------------------|-------------------------------------------------|----------------------------------------------------------------------------------------|
+| `jvm_jar_layers`   | Keeps every runtime JAR intact under `/app/lib` | Recommended. Preserves duplicate resources and matches the normal JVM classpath model. |
+| `jvm_image_layers` | Explodes one deploy JAR under `/app`            | Use only when the deploy JAR's merged-resource behavior is acceptable.                 |
 
 Both rules always produce a fallback tar for unmatched content. With a
 `rules_jvm_external` lock file, Maven dependencies can be placed in separate or
@@ -112,7 +114,6 @@ deploy-JAR rule with `rules_img`.
 
 ## Release checklist
 
-Before onboarding a client, pin a tested commit, choose and add a repository
-license, run both the Go and Bazel suites in CI, and publish a matching `v0.1.x`
-tag. A license and hosted release are intentionally not inferred by this
-repository.
+Before onboarding a client, pin a green commit, choose and add a repository
+license, and publish a matching `v0.1.x` tag. A license and hosted release are
+intentionally not inferred by this repository.
