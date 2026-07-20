@@ -31,9 +31,19 @@ The tag starts `.github/workflows/release.yml`. If BCR publication needs to be
 retried without recreating the GitHub release, run the **Publish to BCR**
 workflow manually and supply the existing tag.
 
+If the source-archive attestation itself must be regenerated, run the full
+**Release** workflow with the existing tag instead. The publish-only workflow
+regenerates `source.json` and `MODULE.bazel` attestations, but not the release
+archive attestation.
+
 The BCR pull request is intentionally opened as a draft. The token owner must
 mark it ready for review, which serves as the maintainer approval recognized by
 the BCR.
+
+The two attestation-producing reusable workflows are referenced by release tag,
+not commit SHA. BCR's SLSA verifier requires the builder attestation to contain
+a `refs/tags/...` workflow ref and rejects a bare SHA as an unknown ref type.
+Other third-party Actions remain pinned by commit SHA.
 
 The release preparation step rejects malformed tags and refuses to publish
 until a `LICENSE`, `LICENSE.txt`, or `LICENSE.md` file exists.
