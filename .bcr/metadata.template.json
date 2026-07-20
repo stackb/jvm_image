@@ -1,0 +1,16 @@
+{
+  "homepage": "https://github.com/stackb/jvm_image",
+  "maintainers": [
+    {
+      "name": "Paul Johnston",
+      "email": "pcj@stack.build",
+      "github": "pcj",
+      "github_user_id": 50580
+    }
+  ],
+  "repository": [
+    "github:stackb/jvm_image"
+  ],
+  "versions": [],
+  "yanked_versions": {}
+}
