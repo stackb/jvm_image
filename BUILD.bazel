@@ -1,14 +1,6 @@
-load("@bazel_skylib//:bzl_library.bzl", "bzl_library")
-
 exports_files([
     "MODULE.bazel",
-    "jvm_image_layers.bzl",
+    "jvm_jar_layers.bzl",
 ])
 
 # gazelle:prefix github.com/stackb/jvm_image
-
-bzl_library(
-    name = "jvm_image_layers",
-    srcs = ["jvm_image_layers.bzl"],
-    visibility = ["//visibility:public"],
-)

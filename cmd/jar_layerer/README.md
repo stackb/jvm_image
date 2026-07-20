@@ -1,6 +1,6 @@
 # jar_layerer
 
-Distributes individual JVM dependency JARs across OCI container layer tarballs
+Distributes individual JVM runtime JARs across OCI container layer tarballs
 for efficient caching, while preserving each JAR intact.
 
 ## Why this exists
@@ -12,15 +12,15 @@ dropping entries from other JARs. This causes runtime failures when libraries
 like Typesafe Config or Java's `ServiceLoader` expect to scan all JARs on the
 classpath for their resources.
 
-`jar_layerer` avoids the problem entirely by keeping each dependency JAR as an
-individual file in the container. The JVM loads them via a classpath file, giving
-identical behavior to `bazel run` (which already uses individual JARs).
+`jar_layerer` avoids the problem by keeping each dependency JAR as an
+individual file in the container. The JVM loads them via a classpath file, which
+preserves the per-JAR resource layout used by a normal JVM runtime classpath.
 
 ## How it works
 
 ```
 scala_binary
-  └─ JavaInfo.transitive_runtime_jars  (individual JARs from Bazel)
+  └─ JVM runtime classpath  (individual JARs from Bazel)
        │
        ▼
   jar_layerer
@@ -31,9 +31,9 @@ scala_binary
        └─ fallback.tar       ← unmatched JARs + classpath file
 ```
 
-Each output tar contains intact `.jar` files under a configurable path prefix
-(default `app/lib/`). A classpath file is written both to disk (for Bazel) and
-into the fallback tar (so it's present in the container at runtime).
+JAR entries are stored intact under a configurable path prefix (default
+`app/lib/`). A classpath file is written both to disk (for Bazel) and into the
+fallback tar (so it's present in the container at runtime).
 
 The container entrypoint uses Java's `@file` syntax to read the classpath:
 
@@ -43,15 +43,17 @@ java ${JAVA_OPTS} -cp @/app/lib/classpath com.example.Main
 
 ## Artifact routing
 
-When a Maven lock file is provided, the tool inspects each JAR to determine
-which Maven artifact it belongs to:
+Maven integration is optional. When a `rules_jvm_external` lock file is
+provided, the tool inspects each JAR to determine which Maven artifact it
+belongs to:
 
-1. Open the JAR (ZIP) and find the first `.class` entry.
-2. Derive the Java package from the class path (e.g.
+1. Open the JAR (ZIP) and inspect its `.class` entries.
+2. Derive Java packages from class paths (e.g.
    `com/google/common/collect/Lists.class` → `com.google.common.collect`).
 3. Look up the package in the lock file's `packages` map to find the artifact ID
    (e.g. `com.google.guava:guava`).
-4. Route the JAR to the corresponding artifact layer tar.
+4. Route the JAR when all matches identify one artifact. Ambiguous ownership is
+   sent to the fallback instead of depending on ZIP or map iteration order.
 
 JARs that don't match any artifact go to the fallback tar.
 
@@ -87,10 +89,10 @@ from the full Bazel output path:
 
 ## Starlark integration
 
-The `jvm_jar_layers` rule in `jvm_image_layers.bzl` drives this tool:
+The `jvm_jar_layers` rule in `jvm_jar_layers.bzl` drives this tool:
 
 ```starlark
-load("@jvm_image//:jvm_image_layers.bzl", "jvm_jar_layers")
+load("@jvm_image//:jvm_jar_layers.bzl", "jvm_jar_layers")
 
 jvm_jar_layers(
     name = "my_layers",
@@ -100,8 +102,11 @@ jvm_jar_layers(
 ```
 
 The rule:
-- Collects `transitive_runtime_jars` from the binary's `JavaInfo` provider.
-- Uses `_maven_deps_aspect` to collect Maven artifact IDs from `maven_coordinates=` tags.
+
+- Collects the binary's runtime classpath from `JavaRuntimeClasspathInfo`, with
+  `JavaInfo.transitive_runtime_jars` as a compatibility fallback.
+- Uses `_maven_artifacts_aspect` and `_MavenArtifactsInfo` to collect Maven
+  artifact IDs from `maven_coordinates=` tags.
 - Writes a jar list file and passes it to `jar_layerer`.
 - Declares per-artifact (or per-group) output tars.
 - Outputs all tars via `DefaultInfo` and the classpath file via `OutputGroupInfo`.
@@ -120,14 +125,3 @@ The rule:
 | `--artifact_group_layer` | `ID1,ID2,...=path.tar` — multiple artifacts sharing a layer (repeatable) |
 
 Positional arguments are also accepted as additional JAR paths.
-
-## Comparison with executable_jar_splitter
-
-| | `executable_jar_splitter` | `jar_layerer` |
-|---|---|---|
-| Input | Single deploy JAR (merged) | Individual dependency JARs |
-| Output | Exploded files in tar layers | Intact JARs in tar layers |
-| `reference.conf` | Lost (singlejar last-writer-wins) | Preserved (each JAR has its own) |
-| `META-INF/services` | Lost (singlejar last-writer-wins) | Preserved |
-| Runtime behavior | May differ from `bazel run` | Identical to `bazel run` |
-| Entrypoint | `java -cp /app MainClass` | `java -cp @/app/lib/classpath MainClass` |

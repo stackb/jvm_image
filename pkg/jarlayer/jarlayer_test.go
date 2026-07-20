@@ -162,8 +162,8 @@ func TestLayerJars_ArtifactRouting(t *testing.T) {
 	// Lock file maps artifact IDs to packages.
 	lockPath := filepath.Join(dir, "lock.json")
 	createLockFile(t, lockPath, map[string][]string{
-		"com.google.guava:guava":             {"com.google.common.collect", "com.google.common.base"},
-		"org.apache.pekko:pekko-actor_2.13":  {"org.apache.pekko.actor"},
+		"com.google.guava:guava":            {"com.google.common.collect", "com.google.common.base"},
+		"org.apache.pekko:pekko-actor_2.13": {"org.apache.pekko.actor"},
 	})
 
 	guavaLayerPath := filepath.Join(dir, "guava.tar")
@@ -221,7 +221,7 @@ func TestLayerJars_GroupedArtifacts(t *testing.T) {
 
 	lockPath := filepath.Join(dir, "lock.json")
 	createLockFile(t, lockPath, map[string][]string{
-		"com.google.guava:guava":         {"com.google.common.collect"},
+		"com.google.guava:guava":            {"com.google.common.collect"},
 		"com.google.protobuf:protobuf-java": {"com.google.protobuf"},
 	})
 
@@ -438,4 +438,120 @@ func keys(m map[string]string) []string {
 		result = append(result, k)
 	}
 	return result
+}
+
+func TestLayerJars_NormalizesAppPrefix(t *testing.T) {
+	dir := t.TempDir()
+	jarPath := filepath.Join(dir, "dep.jar")
+	createTestJar(t, jarPath, map[string]string{"com/example/Dep.class": "dep"})
+	cpPath := filepath.Join(dir, "classpath")
+
+	if err := LayerJars(LayerOptions{
+		JarPaths:      []string{jarPath},
+		FallbackPath:  filepath.Join(dir, "fallback.tar"),
+		ClasspathPath: cpPath,
+		AppPrefix:     "/app/lib/",
+		PathPrefix:    "app/lib/",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	data, err := os.ReadFile(cpPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(data), "/app/lib/dep.jar"; got != want {
+		t.Fatalf("classpath = %q, want %q", got, want)
+	}
+}
+
+func TestLayerJars_RejectsConflictingOutputs(t *testing.T) {
+	dir := t.TempDir()
+	shared := filepath.Join(dir, "shared")
+	err := LayerJars(LayerOptions{
+		FallbackPath:  shared,
+		ClasspathPath: shared,
+		AppPrefix:     "/app/lib",
+		PathPrefix:    "app/lib/",
+	})
+	if err == nil || !strings.Contains(err.Error(), "shared") {
+		t.Fatalf("LayerJars() error = %v, want shared output error", err)
+	}
+}
+
+func TestLayerJars_ArtifactLayersRequireLockFile(t *testing.T) {
+	dir := t.TempDir()
+	err := LayerJars(LayerOptions{
+		FallbackPath: filepath.Join(dir, "fallback.tar"),
+		AppPrefix:    "/app/lib",
+		PathPrefix:   "app/lib/",
+		ArtifactLayers: []ArtifactLayer{{
+			IDs:        []string{"com.example:dep"},
+			OutputPath: filepath.Join(dir, "dep.tar"),
+		}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "lock file is required") {
+		t.Fatalf("LayerJars() error = %v, want missing lock file error", err)
+	}
+}
+
+func TestBuildPackageMap_MarksAmbiguousPackage(t *testing.T) {
+	dir := t.TempDir()
+	lockPath := filepath.Join(dir, "lock.json")
+	createLockFile(t, lockPath, map[string][]string{
+		"com.example:first":  {"com.example"},
+		"com.example:second": {"com.example"},
+	})
+
+	pkgMap, err := buildPackageMap(lockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if artifactID, ok := pkgMap["com/example/"]; !ok || artifactID != "" {
+		t.Fatalf("ambiguous package mapping = %q, %v; want empty marker", artifactID, ok)
+	}
+}
+
+func TestIdentifyArtifact_AmbiguousJarUsesFallback(t *testing.T) {
+	dir := t.TempDir()
+	jarPath := filepath.Join(dir, "ambiguous.jar")
+	createTestJar(t, jarPath, map[string]string{
+		"com/first/One.class":  "one",
+		"org/second/Two.class": "two",
+	})
+
+	artifactID, err := identifyArtifact(jarPath, map[string]string{
+		"com/first/":  "com.example:first",
+		"org/second/": "org.example:second",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if artifactID != "" {
+		t.Fatalf("identifyArtifact() = %q, want fallback", artifactID)
+	}
+}
+
+func TestLayerJars_RejectsUnsafePathPrefix(t *testing.T) {
+	dir := t.TempDir()
+	err := LayerJars(LayerOptions{
+		FallbackPath: filepath.Join(dir, "fallback.tar"),
+		AppPrefix:    "/app/lib",
+		PathPrefix:   "../app/",
+	})
+	if err == nil || !strings.Contains(err.Error(), "escape the archive root") {
+		t.Fatalf("LayerJars() error = %v, want unsafe prefix error", err)
+	}
+}
+
+func TestLayerJars_RejectsUnsafeAppPrefix(t *testing.T) {
+	dir := t.TempDir()
+	err := LayerJars(LayerOptions{
+		FallbackPath: filepath.Join(dir, "fallback.tar"),
+		AppPrefix:    "/app/../etc",
+		PathPrefix:   "app/lib/",
+	})
+	if err == nil || !strings.Contains(err.Error(), "app prefix") {
+		t.Fatalf("LayerJars() error = %v, want invalid app prefix error", err)
+	}
 }

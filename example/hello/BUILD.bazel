@@ -1,4 +1,4 @@
-load("@jvm_image//:jvm_image_layers.bzl", "jvm_image_layers")
+load("@jvm_image//:jvm_jar_layers.bzl", "jvm_jar_layers")
 load("@rules_img//img:image.bzl", "image_manifest")
 load("@rules_img//img:load.bzl", "image_load")
 load("@rules_java//java:java_binary.bzl", "java_binary")
@@ -10,18 +10,10 @@ java_binary(
     deps = ["@maven2//:com_google_guava_guava"],
 )
 
-jvm_image_layers(
+jvm_jar_layers(
     name = "layers",
-    # max_layers = -1,
-    app_prefix = "/app",
     binary = ":hello",
     maven_lock_file = "maven2_install.json",
-)
-
-filegroup(
-    name = "entrypoint",
-    srcs = [":layers"],
-    output_group = "entrypoint",
 )
 
 image_manifest(
@@ -30,7 +22,7 @@ image_manifest(
     entrypoint = [
         "java",
         "-cp",
-        "/app",
+        "@/app/lib/classpath",
         "example.hello.Main",
     ],
     layers = [":layers"],

@@ -1,12 +1,14 @@
+"""Module definition and development toolchain configuration for jvm_image."""
+
 module(
     name = "jvm_image",
-    version = "0.0.0",
-    compatibility_level = 1,
+    version = "0.1.0",
 )
 
-bazel_dep(name = "bazel_skylib", version = "1.7.1")
+bazel_dep(name = "bazel_skylib", version = "1.9.0")
 bazel_dep(name = "gazelle", version = "0.47.0")
 bazel_dep(name = "rules_go", version = "0.59.0")
+bazel_dep(name = "rules_java", version = "8.14.0")
 
 bazel_dep(name = "buildifier_prebuilt", version = "8.2.1.2", dev_dependency = True)
 bazel_dep(name = "bazel_skylib_gazelle_plugin", version = "1.9.0", dev_dependency = True)
