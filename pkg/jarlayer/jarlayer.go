@@ -190,6 +190,20 @@ func LayerJars(opts LayerOptions) (retErr error) {
 	return nil
 }
 
+// WriteEmptyTar writes a valid tar archive containing no entries. Pad layers
+// use it so every declared layer slot yields a byte-identical, deduplicable
+// blob.
+func WriteEmptyTar(outputPath string) (retErr error) {
+	lw, err := newLayerWriter(outputPath)
+	if err != nil {
+		return fmt.Errorf("creating pad layer: %w", err)
+	}
+	if closeErr := lw.Close(); closeErr != nil {
+		return fmt.Errorf("closing pad layer: %w", closeErr)
+	}
+	return nil
+}
+
 // LayerData writes files into a deterministic tar using their Bazel runfiles
 // paths. Directories are expanded recursively and symlinks are rejected.
 func LayerData(outputPath string, files []DataFile) (retErr error) {

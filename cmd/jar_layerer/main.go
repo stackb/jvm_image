@@ -32,6 +32,8 @@ func main() {
 	flag.Var(&artifactLayers, "artifact_layer", "ARTIFACT_ID=path.tar (repeatable)")
 	var artifactGroupLayers repeatedFlag
 	flag.Var(&artifactGroupLayers, "artifact_group_layer", "ID1,ID2,...=path.tar (repeatable)")
+	var padLayers repeatedFlag
+	flag.Var(&padLayers, "pad_layer", "path to write an empty layer tar (repeatable)")
 
 	flag.Parse()
 
@@ -121,6 +123,13 @@ func main() {
 		}
 		if err := jarlayer.LayerData(*dataLayer, files); err != nil {
 			fmt.Fprintf(os.Stderr, "layering data: %v\n", err)
+			os.Exit(1)
+		}
+	}
+
+	for _, path := range padLayers {
+		if err := jarlayer.WriteEmptyTar(path); err != nil {
+			fmt.Fprintf(os.Stderr, "writing pad layer: %v\n", err)
 			os.Exit(1)
 		}
 	}

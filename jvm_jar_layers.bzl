@@ -154,6 +154,13 @@ def _group_artifacts(artifact_ids, max_groups):
     # max_groups is 0: no artifact layers at all.
     return []
 
+# Non-maven layer slots: the data-runfiles tar and the fallback tar.
+_EXTRA_LAYER_SLOTS = 2
+
+def jvm_jar_layer_slots(max_layers):
+    """Number of `<name>.layer_N` filegroups emitted for a given max_layers."""
+    return max_layers + _EXTRA_LAYER_SLOTS
+
 def jvm_jar_layers(
         name,
         binary,
@@ -171,6 +178,13 @@ def jvm_jar_layers(
 
     The container classpath uses Java's @file syntax to reference a classpath
     file listing all JARs.
+
+    Because the number and names of the layer tars are only known at analysis
+    time, each tar is also exposed through a fixed-name `<name>.layer_N`
+    filegroup (N in range(jvm_jar_layer_slots(max_layers))) so image rules can
+    map each tar to its own image layer. Slots beyond the produced tar count
+    are padded with empty tars, which compress to byte-identical, deduplicable
+    layer blobs.
 
     Args:
         name: target name
@@ -200,6 +214,13 @@ def jvm_jar_layers(
         path_prefix = path_prefix,
         **kwargs
     )
+
+    for index in range(jvm_jar_layer_slots(max_layers)):
+        native.filegroup(
+            name = "%s.layer_%d" % (name, index),
+            srcs = [name],
+            output_group = "layer_%d" % index,
+        )
 
 def _jvm_jar_layers_impl(ctx):
     runtime_jars = _runtime_jars(ctx.attr.binary)
@@ -289,6 +310,14 @@ def _jvm_jar_layers_impl(ctx):
                     args.add("--artifact_group_layer", ",".join(group_ids) + "=" + group_out.path)
                 tar_outputs.append(group_out)
 
+    # Pad remaining slots with empty tars so every layer_N output group (and
+    # its filegroup) yields exactly one tar file — image rules typically reject
+    # labels that produce no tar.
+    for index in range(len(tar_outputs), jvm_jar_layer_slots(ctx.attr.max_layers)):
+        pad = ctx.actions.declare_file(ctx.label.name + ".pad_%d.tar" % index)
+        args.add("--pad_layer", pad)
+        tar_outputs.append(pad)
+
     ctx.actions.run(
         inputs = inputs,
         outputs = tar_outputs + [classpath_file],
@@ -300,11 +329,14 @@ def _jvm_jar_layers_impl(ctx):
 
     # DefaultInfo only includes tar files — the classpath file is a plain text
     # file and must not be passed to container_image's tars attribute.
+    output_groups = {"classpath": depset([classpath_file])}
+    for index in range(jvm_jar_layer_slots(ctx.attr.max_layers)):
+        files = [tar_outputs[index]] if index < len(tar_outputs) else []
+        output_groups["layer_%d" % index] = depset(files)
+
     return [
         DefaultInfo(files = depset(tar_outputs)),
-        OutputGroupInfo(
-            classpath = depset([classpath_file]),
-        ),
+        OutputGroupInfo(**output_groups),
     ]
 
 _jvm_jar_layers = rule(
