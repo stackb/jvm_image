@@ -10,7 +10,11 @@ bazel_dep(name = "gazelle", version = "0.47.0", dev_dependency = True)
 bazel_dep(name = "rules_go", version = "0.59.0")
 bazel_dep(name = "rules_java", version = "8.14.0")
 
-go_sdk = use_extension("@rules_go//go:extensions.bzl", "go_sdk")
+go_sdk = use_extension(
+    "@rules_go//go:extensions.bzl",
+    "go_sdk",
+    dev_dependency = True,
+)
 go_sdk.from_file(
     go_mod = "//:go.mod",
 )
