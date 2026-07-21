@@ -57,6 +57,7 @@ pull = use_repo_rule("@rules_img//img:pull.bzl", "pull")
 pull(
     name = "distroless_java",
     digest = "sha256:4eadd00d3bff73e6a7491dd36653c1d318ac93fb1fb2cd5eef768fd2b4238408",
+    layer_handling = "lazy",
     registry = "gcr.io",
     repository = "distroless/java25-debian13",
     tag = "nonroot",
