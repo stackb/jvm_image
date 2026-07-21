@@ -1,6 +1,5 @@
 load("@buildifier_prebuilt//:rules.bzl", "buildifier", "buildifier_test")
-load("@gazelle//:def.bzl", "gazelle", "gazelle_binary")
-load("@rules_go//go:def.bzl", "TOOLS_NOGO", "nogo")
+load("@gazelle//:def.bzl", "gazelle")
 
 buildifier(
     name = "buildifier.fix",
@@ -20,22 +19,6 @@ buildifier_test(
     workspace = "//:MODULE.bazel",
 )
 
-gazelle_binary(
-    name = "gazelle_bin",
-    languages = [
-        "@gazelle//language/go",
-        "@gazelle//language/proto",
-        "@bazel_skylib_gazelle_plugin//bzl",
-    ],
-)
-
 gazelle(
     name = "gazelle",
-    gazelle = "gazelle_bin",
-)
-
-nogo(
-    name = "nogo",
-    visibility = ["//visibility:public"],
-    deps = TOOLS_NOGO,
 )

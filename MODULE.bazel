@@ -4,13 +4,11 @@ module(
     name = "jvm_image",
 )
 
-bazel_dep(name = "bazel_skylib", version = "1.9.0")
-bazel_dep(name = "gazelle", version = "0.47.0")
+bazel_dep(name = "buildifier_prebuilt", version = "8.2.1.2", dev_dependency = True)
+bazel_dep(name = "gazelle", version = "0.47.0", dev_dependency = True)
+
 bazel_dep(name = "rules_go", version = "0.59.0")
 bazel_dep(name = "rules_java", version = "8.14.0")
-
-bazel_dep(name = "buildifier_prebuilt", version = "8.2.1.2", dev_dependency = True)
-bazel_dep(name = "bazel_skylib_gazelle_plugin", version = "1.9.0", dev_dependency = True)
 
 go_sdk = use_extension("@rules_go//go:extensions.bzl", "go_sdk")
 go_sdk.from_file(
@@ -20,8 +18,12 @@ go_sdk.nogo(
     includes = [
         "@jvm_image//:__subpackages__",
     ],
-    nogo = "//util:nogo",
+    nogo = "//internal/nogo",
 )
 
-go_deps = use_extension("@gazelle//:extensions.bzl", "go_deps")
+go_deps = use_extension(
+    "@gazelle//:extensions.bzl",
+    "go_deps",
+    dev_dependency = True,
+)
 go_deps.from_file(go_mod = "//:go.mod")
