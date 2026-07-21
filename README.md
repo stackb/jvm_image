@@ -17,6 +17,37 @@ dependencies can instead be placed in separate or grouped layers so
 application-only changes retain the same dependency-layer digests for
 registry- and fleet-wide cache reuse.
 
+## How it fits together
+
+```mermaid
+flowchart
+    binary["java_binary or scala_binary"]
+    runtime["Runtime JARs<br/>JavaRuntimeClasspathInfo"]
+    data["Binary runfiles<br/>and explicit data"]
+    lock["Optional Maven lock file"]
+    rule["jvm_jar_layers"]
+
+    binary --> runtime --> rule
+    binary --> data --> rule
+    lock -.->|artifact routing| rule
+
+    rule --> maven["Maven dependency layers<br/>/app/lib/*.jar"]
+    rule --> fallback["Fallback layer<br/>app JARs + unmatched JARs"]
+    rule --> runfiles["Data layer<br/>/app/&lt;repo&gt;/..."]
+    rule --> classpath["/app/lib/classpath"]
+    classpath --> fallback
+
+    base["Base JVM image"] --> image["OCI image rule"]
+    maven --> image
+    fallback --> image
+    runfiles --> image
+
+    image --> output["OCI image"]
+    output --> entrypoint["Entrypoint<br/>java -cp @/app/lib/classpath MainClass"]
+    entrypoint -.->|loads intact JARs| maven
+    entrypoint -.->|loads app and fallback JARs| fallback
+```
+
 ## Install
 
 Until the module is published to a registry, add a pinned override to the
@@ -25,10 +56,13 @@ client's `MODULE.bazel`:
 ```starlark
 bazel_dep(name = "jvm_image", version = "0.1.0")
 
-git_override(
+archive_override(
     module_name = "jvm_image",
-    commit = "<full-commit-sha>",
-    remote = "https://github.com/stackb/jvm_image.git",
+    integrity = "sha256-FcnG0wSlMCAIGnLykKyQIshz8jauYHi8KEdDX5nNG+A=",
+    strip_prefix = "jvm_image-0.1.0",
+    urls = [
+        "https://github.com/stackb/jvm_image/releases/download/v0.1.0/jvm_image-v0.1.0.tar.gz",
+    ],
 )
 ```
 
@@ -82,6 +116,38 @@ runfiles layer under `/app`. Workspace files use
 `/app/<canonical-repository>/<package>/<file>`. Set `JAVA_RUNFILES=/app` when
 the application uses Bazel's runfiles lookup conventions. Host JDK files,
 binary launchers, and runtime JARs are excluded from this data layer.
+
+The `example/hello` oci_tarball has the following structure:
+
+```
+--- sha256:c4fd6f20ece135d1caf7d46368138b7aa58603e775f01c24479912075ec8c490 ---
+Mode        Size  Name
+-rw-r--r--  34 B  app/_main/greeting.txt
+-rw-r--r--  36 B  app/_main/runtime/native.marker
+
+--- sha256:19730c7f427ef030cf5b9eb1b610fc5d01855a9100e0ea08bdd5da06640fca7f ---
+-rw-r--r--  1.2 kB  app/lib/hello.jar
+-rw-r--r--  2.3 kB  app/lib/processed_listenablefuture-9999.0-empty-to-avoid-conflict-with-guava.jar
+-rw-r--r--  364 B   app/lib/classpath
+
+--- sha256:3abdf128e65e2e1437f3ac7346c0e9fabdf3f9842a99cbcbef42207181b64065 ---
+-rw-r--r--  21 kB  app/lib/processed_jsr305-3.0.2.jar
+
+--- sha256:1cbbdab98aee4c1ea5436f305f2cd68169443dfa4f0931becb4800d73371706f ---
+-rw-r--r--  19 kB  app/lib/processed_error_prone_annotations-2.36.0.jar
+
+--- sha256:58c28ed69316ce659037cb1df9c51533878a956c5e8bbe3bca7be9ef5bb428f7 ---
+-rw-r--r--  4.8 kB  app/lib/processed_failureaccess-1.0.2.jar
+
+--- sha256:a6ef98beaef5ab8b409ca6cec41b3d5be38804bcec418b3c3138cd470e5704e3 ---
+-rw-r--r--  3.1 MB  app/lib/processed_guava-33.4.0-jre.jar
+
+--- sha256:8d650354e3037e3908f78628d47b637d0ec1922988c5f24a75b2a15626502c8b ---
+-rw-r--r--  12 kB  app/lib/processed_j2objc-annotations-3.0.0.jar
+
+--- sha256:05fd8c687c7112da76548914db47d51d43f023ce2ac3cde4dc91c1a8aad92bd0 ---
+-rw-r--r--  232 kB  app/lib/processed_checker-qual-3.43.0.jar
+```
 
 ## Configuration notes
 
