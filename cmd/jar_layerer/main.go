@@ -34,6 +34,8 @@ func main() {
 	flag.Var(&artifactGroupLayers, "artifact_group_layer", "ID1,ID2,...=path.tar (repeatable)")
 	var padLayers repeatedFlag
 	flag.Var(&padLayers, "pad_layer", "path to write an empty layer tar (repeatable)")
+	var ensureDirs repeatedFlag
+	flag.Var(&ensureDirs, "ensure_dir", "directory entry to always create in the fallback tar (repeatable)")
 
 	flag.Parse()
 
@@ -48,6 +50,7 @@ func main() {
 		ClasspathPath: *classpath,
 		AppPrefix:     *appPrefix,
 		PathPrefix:    *pathPrefix,
+		EnsureDirs:    ensureDirs,
 	}
 
 	// Read JAR list from file.
