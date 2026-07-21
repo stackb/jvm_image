@@ -277,6 +277,12 @@ def _jvm_jar_layers_impl(ctx):
     args.add("--fallback", fallback)
     tar_outputs.append(fallback)
 
+    # Always materialize the workspace runfiles directory: consumers commonly
+    # set the image WorkingDir to /app/<workspace> for runfiles-relative
+    # flags, and OCI runtimes fail chdir when the directory is absent (it is
+    # otherwise only created when data runfiles exist).
+    args.add("--ensure_dir", "app/" + ctx.workspace_name)
+
     # Maven artifact layers via aspect.
     if ctx.file.maven_lock_file:
         lock_file = ctx.file.maven_lock_file

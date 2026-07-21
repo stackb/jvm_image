@@ -622,3 +622,33 @@ func TestLayerData_RejectsUnsafeDestination(t *testing.T) {
 		t.Fatalf("LayerData() error = %v, want unsafe destination error", err)
 	}
 }
+
+func TestLayerJars_EnsureDirs(t *testing.T) {
+	dir := t.TempDir()
+
+	jar1 := filepath.Join(dir, "dep1.jar")
+	createTestJar(t, jar1, map[string]string{
+		"com/example/Foo.class": "foo-bytes",
+	})
+
+	fallbackPath := filepath.Join(dir, "fallback.tar")
+
+	err := LayerJars(LayerOptions{
+		JarPaths:      []string{jar1},
+		FallbackPath:  fallbackPath,
+		ClasspathPath: filepath.Join(dir, "classpath"),
+		AppPrefix:     "/app/lib",
+		PathPrefix:    "app/lib/",
+		EnsureDirs:    []string{"app/_main"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	entries := readTar(t, fallbackPath)
+	for _, want := range []string{"app/", "app/_main/"} {
+		if _, ok := entries[want]; !ok {
+			t.Errorf("expected directory entry %q in fallback tar", want)
+		}
+	}
+}

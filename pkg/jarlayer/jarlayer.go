@@ -32,6 +32,11 @@ type LayerOptions struct {
 	AppPrefix string
 	// PathPrefix is prepended to tar entry paths (e.g., "app/lib/").
 	PathPrefix string
+	// EnsureDirs lists directories always created in the fallback tar (e.g.
+	// "app/_main"), so that an image WorkingDir pointing at them exists even
+	// when no other entry would create them. OCI runtimes fail chdir on a
+	// missing working directory.
+	EnsureDirs []string
 }
 
 // ArtifactLayer maps one or more artifact IDs to a single output tar.
@@ -107,6 +112,12 @@ func LayerJars(opts LayerOptions) (retErr error) {
 
 	// Track written directories to avoid duplicates across JARs.
 	writtenDirs := make(map[string]map[string]bool) // writer path -> set of dirs
+
+	for _, dir := range opts.EnsureDirs {
+		if err := ensureParentDirs(fallback, strings.TrimSuffix(dir, "/")+"/", writtenDirs); err != nil {
+			return fmt.Errorf("ensuring dir %s: %w", dir, err)
+		}
+	}
 
 	// Process each JAR: determine layer, write to tar, collect classpath.
 	var classpathEntries []string
